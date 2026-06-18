@@ -1,0 +1,37 @@
+# DOMAIN_RULES.yaml — TEMPLATE
+# The business logic that must hold regardless of UI or caller.
+# Same discipline as /app RISK_POLICIES.yaml: thresholds and authority live HERE,
+# as config, never hardcoded in domain code.
+
+version: 1
+
+# 1) Invariants — the rules that can never be violated. Each maps to a checklist
+#    item in DOMAIN_MODEL.md section 4. on_violation is what the system does when
+#    a write would break the rule (reject is the default; never silently fix).
+invariants:
+  - id: "<INV-1>"
+    statement: "<plain-language rule that must always be true>"
+    scope: "<entity or aggregate it applies to>"
+    enforced_at: "<ingest | create | post | close | repository | seam>"
+    on_violation: "reject"        # reject | review | compensate
+    test: "<the assertion that proves it>"
+
+# 2) Policies — named, tunable numbers. Tune per app; keep them here.
+policies:
+  "<policy_name>": "<value + unit>"   # e.g. amount_tolerance_minor: 0
+
+# 3) Authority map — domain action -> permission + minimum tier.
+#    The DOMAIN never enforces this itself; it asks onboarding via the seam
+#    (SEAM_CONTRACT.md). Permissions are namespaced "<domain>." and appended to
+#    /app RBAC.yaml so the same server-side checker enforces them.
+authority_map:
+  "<domain.action>":
+    permission: "<domain.permission>"   # added to /app RBAC.yaml
+    min_tier: "<0-4>"
+    requires_approval: "<y/n>"
+    notes: "<when this fires>"
+
+# 4) Derived / computed rules — values that are calculated, not stored, with the
+#    formula that defines them (so they can't drift between callers).
+derived:
+  "<computed_value>": "<formula in terms of entity fields>"
