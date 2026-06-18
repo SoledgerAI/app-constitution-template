@@ -1,0 +1,74 @@
+# RISK_POLICIES.yaml
+# Runtime source of truth for the risk engine. risk.evaluate() reads this file.
+# Do NOT hardcode any of these values in application code.
+
+version: 1
+
+tiers:
+  0: { name: anonymous,      aal: 0, cleared_by: "bot/human signal" }
+  1: { name: reachable,      aal: 2, cleared_by: "email + passkey" }
+  2: { name: billable,       aal: 2, cleared_by: "profile + tokenized payment method" }
+  3: { name: verified,       aal: 2, cleared_by: "mDL/VC or doc+liveness, sanctions clear", proofing: "fit to use case" }
+  4: { name: high_assurance, aal: 3, cleared_by: "non-exportable device-bound authenticator + step-up" }
+
+# action.name -> minimum tier required to perform it
+action_required_tier:
+  view_sandbox: 0
+  create_workspace: 1
+  save_work: 1
+  invite_by_link: 1
+  add_profile_field: 1
+  start_trial: 1
+  add_payment_method: 2
+  upgrade_plan: 2
+  invite_member: 2
+  raise_usage_limit: 2
+  move_money: 3
+  high_value_transaction: 3
+  regulated_activity: 3
+  connect_bank: 3
+  grant_admin_role: 4
+  large_transfer: 4
+  change_security_settings: 4
+  authorize_agent: 4
+
+# Signal thresholds. Values are illustrative defaults — tune per app, but keep them HERE.
+signal_thresholds:
+  bot_score_min: 0.5            # below => likely bot => deny/redirect at T0
+  email_risk_max: 0.7           # above => disposable/high-risk => prompt work email
+  behavior_anomaly_review: 0.8  # above => review even if tier sufficient
+  velocity_stepup: 0.7          # above => step_up re-auth
+  liveness_min: 0.85            # below at IDV => review (deepfake guard)
+
+# Hard blocks evaluated FIRST, before tier comparison.
+hard_blocks:
+  - if: "sanctions_status == 'hit'"
+    decision: deny
+    reason: sanctions_hit
+  - if: "context.liveness_score < signal_thresholds.liveness_min"
+    decision: review
+    reason: liveness_below_threshold
+  - if: "context.bot_score < signal_thresholds.bot_score_min"
+    decision: deny
+    reason: bot_suspected
+
+# Resolution order after hard_blocks:
+# 1. required = action_required_tier[action.name]
+# 2. if actor.tier < required           -> step_up to required
+# 3. if behavior_anomaly above review   -> review
+# 4. if velocity above stepup           -> step_up (re-auth/MFA)
+# 5. else                               -> allow
+resolution:
+  order: [hard_blocks, tier_gap, anomaly_review, velocity_stepup, allow]
+  default: allow
+
+decisions: [allow, step_up, review, deny]
+
+# Every decision writes one AuditLog row and (for step_up/review/deny) emits the
+# matching event from EVENTS.yaml. step_up to tier 3 routes to /verify-identity;
+# step_up to tier 4 routes to a device-bound passkey + challenge.
+audit:
+  write_on: [allow, step_up, review, deny]
+  emit_event:
+    step_up: step_up_challenged
+    review: identity_verification   # when review originates at IDV
