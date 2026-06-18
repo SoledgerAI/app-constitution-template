@@ -1,4 +1,8 @@
 # DOMAIN_RULES.yaml — reconciliation ledger (worked example)
+# enforced_at and on_violation are kept aligned with INVARIANTS.yaml, which is the
+# single registry of invariant truth. If they ever diverge, the constitution gate
+# (ci/constitution_validate.py) fails the build. Edit INVARIANTS.yaml first, then
+# mirror the change here.
 version: 1
 
 invariants:
@@ -6,20 +10,20 @@ invariants:
     statement: "At run completion, every period entry is in exactly one MatchSet or exactly one Exception."
     scope: ReconciliationRun
     enforced_at: matching_complete
-    on_violation: reject
+    on_violation: halt
     test: "count(matched_entries) + count(exception_entries) == count(period_entries)"
 
   - id: INV-2
     statement: "A MatchSet's residual is within amount_tolerance_minor."
     scope: MatchSet
-    enforced_at: create
+    enforced_at: match_create
     on_violation: reject
     test: "abs(sum(entry.amount_minor for entry in match)) <= policies.amount_tolerance_minor"
 
   - id: INV-3
     statement: "Every Adjustment balances: total debits equal total credits."
     scope: Adjustment
-    enforced_at: post
+    enforced_at: adjustment_post
     on_violation: reject
     test: "sum(line.debit_minor) == sum(line.credit_minor)"
 
@@ -31,16 +35,16 @@ invariants:
     test: "no UPDATE/DELETE on rows where state == posted"
 
   - id: INV-5
-    statement: "(source_id, external_ref) is unique; re-ingest is a no-op."
+    statement: "(org_id, source_id, external_ref) is unique; re-ingest is a no-op."
     scope: LedgerEntry
     enforced_at: ingest
-    on_violation: reject        # silently skip duplicate, log it
+    on_violation: reject        # duplicate is rejected at the write; caller treats the rejection as an idempotent no-op and logs it
     test: "unique index on (org_id, source_id, external_ref)"
 
   - id: INV-6
     statement: "A period cannot close while exceptions above materiality remain unresolved (or waived with authority)."
     scope: Period
-    enforced_at: close
+    enforced_at: period_close
     on_violation: reject
     test: "count(exceptions where materiality == above and state not in [resolved, waived]) == 0"
 
@@ -55,13 +59,13 @@ invariants:
     statement: "Every entity carries org_id; no cross-org reference exists."
     scope: all
     enforced_at: repository
-    on_violation: reject
+    on_violation: halt
     test: "every query is org-scoped; no FK crosses org_id"
 
   - id: INV-9
     statement: "An entry's value_date is within its period range unless carried_forward with an origin link."
     scope: LedgerEntry
-    enforced_at: create
+    enforced_at: entry_create
     on_violation: review
     test: "period.range_start <= value_date <= period.range_end OR state == carried_forward"
 
