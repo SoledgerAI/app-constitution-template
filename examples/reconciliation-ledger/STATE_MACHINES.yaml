@@ -1,0 +1,89 @@
+# STATE_MACHINES.yaml — reconciliation ledger (worked example)
+version: 1
+
+entities:
+
+  ledger_entry:
+    description: One normalized record from a Source.
+    states: [ingested, normalized, matched, exception_open, exception_resolved, carried_forward, written_off, frozen]
+    initial: ingested
+    terminal: [frozen, written_off]
+    transitions:
+      - { from: ingested, to: normalized, event: entry_normalized, guard: "currency and amount valid", effect: "amount stored in signed minor units", emits: entry_normalized, authority: none }
+      - { from: normalized, to: matched, event: entry_matched, guard: "member of a balanced MatchSet", effect: "link to match_id", emits: entry_matched, authority: recon.match }
+      - { from: normalized, to: exception_open, event: entry_excepted, guard: "no balanced match found", effect: "create/attach Exception", emits: exception_opened, authority: none }
+      - { from: exception_open, to: exception_resolved, event: exception_resolved, guard: "linked to posted Adjustment or waiver", effect: "set resolution_ref", emits: exception_resolved, authority: recon.post_adjustment }
+      - { from: exception_open, to: written_off, event: entry_written_off, guard: "below materiality OR waiver with authority", effect: "record write-off reason", emits: exception_resolved, authority: recon.waive_exception }
+      - { from: exception_open, to: carried_forward, event: entry_carried_forward, guard: "approved to defer to next period", effect: "link origin_period_id", emits: entry_carried_forward, authority: recon.close_period }
+      - { from: matched, to: normalized, event: run_reopened, guard: "owning run reopened", effect: "dissolve match link", emits: null, authority: recon.reopen_period }
+      - { from: matched, to: frozen, event: period_closed, guard: "period closed", effect: "make immutable", emits: null, authority: recon.close_period }
+      - { from: exception_resolved, to: frozen, event: period_closed, guard: "period closed", effect: "make immutable", emits: null, authority: recon.close_period }
+    forbidden_transitions:
+      - { from: frozen, to: normalized, reason: "Closed-period entries are immutable; reopen the period instead (audited)." }
+      - { from: matched, to: matched, reason: "An entry cannot belong to two match sets." }
+      - { from: written_off, to: matched, reason: "Written-off items are terminal; reverse via adjustment, not re-match." }
+    idempotent_events: [entry_normalized, period_closed]
+
+  reconciliation_run:
+    description: One matching execution for a period.
+    states: [draft, ingesting, matching, in_review, balanced, unbalanced, closed, reopened, failed]
+    initial: draft
+    terminal: [closed, failed]
+    transitions:
+      - { from: draft, to: ingesting, event: run_started, guard: "period is open", effect: "pull source entries", emits: null, authority: recon.run }
+      - { from: ingesting, to: matching, event: ingest_complete, guard: "all sources loaded", effect: "apply matching profile", emits: null, authority: none }
+      - { from: matching, to: in_review, event: matching_complete, guard: "conservation holds (INV-1)", effect: "surface exceptions", emits: null, authority: none }
+      - { from: in_review, to: balanced, event: run_balanced, guard: "no exceptions above materiality", effect: "mark balanced", emits: null, authority: none }
+      - { from: in_review, to: unbalanced, event: run_unbalanced, guard: "exceptions above materiality remain", effect: "block close", emits: null, authority: none }
+      - { from: balanced, to: closed, event: run_closed, guard: "period close authorized", effect: "freeze run", emits: null, authority: recon.close_period }
+      - { from: closed, to: reopened, event: run_reopened, guard: "Tier 4 + audit reason", effect: "unfreeze for correction", emits: null, authority: recon.reopen_period }
+      - { from: ingesting, to: failed, event: run_failed, guard: "source error", effect: "log + alert", emits: null, authority: none }
+    forbidden_transitions:
+      - { from: unbalanced, to: closed, reason: "A period cannot close while material exceptions are open (INV-6)." }
+    idempotent_events: [ingest_complete, run_closed]
+
+  exception:
+    description: An unmatched or out-of-tolerance item.
+    states: [open, investigating, resolved, waived, escalated, closed]
+    initial: open
+    terminal: [closed]
+    transitions:
+      - { from: open, to: investigating, event: exception_claimed, guard: "assignee set", effect: "assign owner", emits: null, authority: recon.match }
+      - { from: investigating, to: resolved, event: exception_resolved, guard: "balanced adjustment posted", effect: "link adj_id", emits: exception_resolved, authority: recon.post_adjustment }
+      - { from: investigating, to: waived, event: exception_waived, guard: "below materiality OR authorized waiver", effect: "record waiver", emits: exception_resolved, authority: recon.waive_exception }
+      - { from: investigating, to: escalated, event: exception_escalated, guard: "above threshold / unresolved", effect: "notify owner", emits: null, authority: none }
+      - { from: resolved, to: closed, event: exception_closed, guard: "period closing", effect: "finalize", emits: null, authority: recon.close_period }
+      - { from: waived, to: closed, event: exception_closed, guard: "period closing", effect: "finalize", emits: null, authority: recon.close_period }
+    forbidden_transitions:
+      - { from: closed, to: open, reason: "Closed exceptions are terminal; reopen the period to revisit." }
+    idempotent_events: [exception_closed]
+
+  adjustment:
+    description: A balanced double-entry correction.
+    states: [drafted, pending_approval, posted, rejected, reversed]
+    initial: drafted
+    terminal: [posted, rejected, reversed]
+    transitions:
+      - { from: drafted, to: posted, event: adjustment_posted, guard: "balances (INV-3) AND amount <= auto_post_limit", effect: "post immutably", emits: null, authority: recon.post_adjustment }
+      - { from: drafted, to: pending_approval, event: adjustment_submitted, guard: "amount > auto_post_limit", effect: "queue for approver", emits: null, authority: recon.post_adjustment }
+      - { from: pending_approval, to: posted, event: adjustment_approved, guard: "approver != author AND Tier 4", effect: "post immutably", emits: null, authority: recon.post_adjustment }
+      - { from: pending_approval, to: rejected, event: adjustment_rejected, guard: "approver decision", effect: "record reason", emits: null, authority: recon.post_adjustment }
+      - { from: posted, to: reversed, event: adjustment_reversed, guard: "new reversing entry created", effect: "link reverses_adj_id; original stays immutable", emits: null, authority: recon.post_adjustment }
+    forbidden_transitions:
+      - { from: posted, to: drafted, reason: "Posted adjustments are immutable (INV-4); reverse instead of edit." }
+      - { from: pending_approval, to: posted, reason: "Self-approval forbidden — approver must differ from author." }
+    idempotent_events: [adjustment_posted]
+
+  period:
+    description: The time window being reconciled and closed.
+    states: [open, in_progress, closing, closed, reopened]
+    initial: open
+    terminal: [closed]
+    transitions:
+      - { from: open, to: in_progress, event: first_run_started, guard: "a run exists", effect: "mark in progress", emits: null, authority: recon.run }
+      - { from: in_progress, to: closing, event: close_requested, guard: "latest run balanced", effect: "lock new ingest", emits: null, authority: recon.close_period }
+      - { from: closing, to: closed, event: period_closed, guard: "no material exceptions open (INV-6) AND Tier 3", effect: "freeze all entries/matches", emits: null, authority: recon.close_period }
+      - { from: closed, to: reopened, event: period_reopened, guard: "Tier 4 + audit reason", effect: "unfreeze for correction", emits: null, authority: recon.reopen_period }
+    forbidden_transitions:
+      - { from: closing, to: closed, reason: "Blocked while material exceptions remain (INV-6)." }
+    idempotent_events: [period_closed]
