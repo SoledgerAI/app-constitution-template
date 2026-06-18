@@ -1,0 +1,24 @@
+# INVARIANTS.yaml — TEMPLATE
+# Invariants are TRUTH. Policies are settings. They are separated on purpose:
+# policies change (a tolerance, a threshold); invariants do not (debits equal
+# credits, forever). This file is the single registry of what must never be false.
+# Severity drives enforcement urgency, alerting, and escalation (see OBSERVABILITY.md).
+#
+# Rule: an invariant here MUST be (1) enforced at a write point in DOMAIN_RULES.yaml
+# and (2) observable as a metric in OBSERVABILITY.md. If it isn't both, it's a wish.
+
+version: 1
+
+severity_levels:
+  critical: "Correctness, financial, or security integrity. Violation = stop-the-line; reject or halt."
+  high:     "Serious but recoverable. Violation = review / queue."
+  medium:   "Quality signal. Violation = log / trend."
+
+invariants:
+  "<INV-1>":
+    severity: "<critical|high|medium>"
+    statement: "<the truth that must always hold, in plain language>"
+    scope: "<entity or aggregate>"
+    enforced_at: "<the write point that blocks violation — must match DOMAIN_RULES.yaml>"
+    observable_as: "<metric name defined in OBSERVABILITY.md>"
+    on_violation: "<reject | review | halt>"
