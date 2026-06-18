@@ -79,20 +79,10 @@ Only after Layer 2 is complete and checks pass may code generation begin.
 
 # Required Build Sequence (do not skip or reorder)
 
-1. Define the app (purpose, domain boundary, which regulated overlays apply)
-2. Clone onboarding policy templates → `apps/<app>/onboarding/` and tune them
-3. Complete the domain model
-4. Define invariants
-5. Define domain rules (including the `authority_map` seam binding)
-6. Define state machines
-7. Define event model
-8. Define observability (one metric per invariant)
-9. Define the test plan
-10. Generate the implementation plan
-11. Generate code
-12. Run tests
-13. Review
-14. Deploy
+The canonical, fourteen-step build sequence lives in
+[`APP_BUILD_PROCESS.md`](../APP_BUILD_PROCESS.md) — *Define the app* (step 1),
+*Clone onboarding policy templates* (step 2), through *Deploy* (step 14). Follow
+it exactly; do not restate or reorder it here.
 
 ---
 

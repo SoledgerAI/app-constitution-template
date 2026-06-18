@@ -87,22 +87,9 @@ app-constitution-template/
 
 ## Build sequence
 
-```txt
-1. Define the app
-2. Clone onboarding policy templates
-3. Complete the domain model
-4. Define invariants
-5. Define domain rules
-6. Define state machines
-7. Define event model
-8. Define observability
-9. Define test plan
-10. Generate implementation plan
-11. Generate code
-12. Run tests
-13. Review
-14. Deploy
-```
+The numbered build sequence is maintained in one place — see
+[`APP_BUILD_PROCESS.md`](APP_BUILD_PROCESS.md) for the canonical, fourteen-step
+order (from *Define the app* through *Deploy*).
 
 If a business rule, invariant, permission, risk policy, event, or lifecycle transition is unclear, the agent must stop and ask.
 
