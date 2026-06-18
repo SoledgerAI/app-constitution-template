@@ -1,0 +1,26 @@
+# EVENT_MODEL.yaml — TEMPLATE
+# The domain nervous system: business/state events that drive reactions and feed
+# observability. DISTINCT from /app/EVENTS.yaml, which is onboarding/funnel
+# analytics. A domain event may also be forwarded to analytics, but its primary
+# job is to make state changes explicit, reactable, and auditable.
+#
+# Every event carries the standard envelope; the schema block lists only the
+# event-specific payload on top of it.
+
+version: 1
+
+conventions:
+  naming: "past_tense — <noun>_<verb>, e.g. entry_matched, period_closed"
+  envelope: { event_id: uuid, occurred_at: timestamp, org_id: string, actor_id: string, version: int }
+  pii: "ids and hashes only — never raw personal or financial detail in payload"
+  ordering: "events are append-only; consumers must tolerate at-least-once delivery"
+
+events:
+
+  "<event_name>":
+    producer: "<the state-machine transition or service that emits it>"
+    consumer: ["<services/processes that react>"]
+    schema: { "<field>": "<type>" }          # payload beyond the envelope
+    idempotency: "<dedupe key for safe re-delivery>"
+    retention: "<duration, or 'forever' for audit-bearing events>"
+    drives_invariant: "<INV-id this event is checked against, or none>"
