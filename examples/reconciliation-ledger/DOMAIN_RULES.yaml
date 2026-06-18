@@ -1,0 +1,112 @@
+# DOMAIN_RULES.yaml — reconciliation ledger (worked example)
+version: 1
+
+invariants:
+  - id: INV-1
+    statement: "At run completion, every period entry is in exactly one MatchSet or exactly one Exception."
+    scope: ReconciliationRun
+    enforced_at: matching_complete
+    on_violation: reject
+    test: "count(matched_entries) + count(exception_entries) == count(period_entries)"
+
+  - id: INV-2
+    statement: "A MatchSet's residual is within amount_tolerance_minor."
+    scope: MatchSet
+    enforced_at: create
+    on_violation: reject
+    test: "abs(sum(entry.amount_minor for entry in match)) <= policies.amount_tolerance_minor"
+
+  - id: INV-3
+    statement: "Every Adjustment balances: total debits equal total credits."
+    scope: Adjustment
+    enforced_at: post
+    on_violation: reject
+    test: "sum(line.debit_minor) == sum(line.credit_minor)"
+
+  - id: INV-4
+    statement: "Posted entries and adjustments are immutable; corrections are new postings."
+    scope: LedgerEntry, Adjustment
+    enforced_at: repository
+    on_violation: reject
+    test: "no UPDATE/DELETE on rows where state == posted"
+
+  - id: INV-5
+    statement: "(source_id, external_ref) is unique; re-ingest is a no-op."
+    scope: LedgerEntry
+    enforced_at: ingest
+    on_violation: reject        # silently skip duplicate, log it
+    test: "unique index on (org_id, source_id, external_ref)"
+
+  - id: INV-6
+    statement: "A period cannot close while exceptions above materiality remain unresolved (or waived with authority)."
+    scope: Period
+    enforced_at: close
+    on_violation: reject
+    test: "count(exceptions where materiality == above and state not in [resolved, waived]) == 0"
+
+  - id: INV-7
+    statement: "Entries and matches in a closed period are frozen; reopening requires Tier 4 and is audited."
+    scope: Period
+    enforced_at: write
+    on_violation: reject
+    test: "writes to frozen entities rejected unless period.state == reopened by Tier-4 actor"
+
+  - id: INV-8
+    statement: "Every entity carries org_id; no cross-org reference exists."
+    scope: all
+    enforced_at: repository
+    on_violation: reject
+    test: "every query is org-scoped; no FK crosses org_id"
+
+  - id: INV-9
+    statement: "An entry's value_date is within its period range unless carried_forward with an origin link."
+    scope: LedgerEntry
+    enforced_at: create
+    on_violation: review
+    test: "period.range_start <= value_date <= period.range_end OR state == carried_forward"
+
+policies:
+  amount_tolerance_minor: 0            # exact match by default; raise for rounding noise
+  date_window_days: 3                  # match entries within +/- 3 days
+  materiality_minor: 10000             # 100.00 in a 2-dp currency — above this must resolve before close
+  auto_post_limit_minor: 50000         # adjustments <= 500.00 auto-post; above -> approval
+  default_currency: USD
+  matching_profiles:
+    standard: "match on amount within tolerance AND value_date within date_window_days AND optional reference"
+
+authority_map:
+  recon.run:
+    permission: recon.run
+    min_tier: 1
+    requires_approval: n
+    notes: Execute a reconciliation run.
+  recon.match:
+    permission: recon.match
+    min_tier: 2
+    requires_approval: n
+    notes: Create or dissolve match sets, claim exceptions.
+  recon.post_adjustment:
+    permission: recon.post_adjustment
+    min_tier: 2
+    requires_approval: "y if amount > auto_post_limit_minor"
+    notes: Post a balanced adjustment; large ones require a different approver at Tier 4.
+  recon.waive_exception:
+    permission: recon.waive_exception
+    min_tier: 3
+    requires_approval: n
+    notes: Waive an exception (records waiver + reason).
+  recon.close_period:
+    permission: recon.close_period
+    min_tier: 3
+    requires_approval: n
+    notes: Close a period; blocked by INV-6.
+  recon.reopen_period:
+    permission: recon.reopen_period
+    min_tier: 4
+    requires_approval: y
+    notes: Reopen a closed period; high-assurance, fully audited.
+
+derived:
+  match_residual_minor: "sum(entry.amount_minor for entry in match.entry_ids)"
+  period_balanced: "count(open material exceptions) == 0"
+  adjustment_balanced: "sum(line.debit_minor) - sum(line.credit_minor) == 0"
