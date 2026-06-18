@@ -1,0 +1,129 @@
+# DATA_GOVERNANCE.yaml
+# Source of truth for every field that holds personal data.
+# Rule: no personal-data field may exist in the schema without an entry here.
+# CI should fail the build if an unregistered PII column appears.
+
+version: 1
+
+classifications: [public, internal, pii, sensitive_pii, regulated]
+
+# Each field defines all seven attributes. retention uses ISO-8601 durations or "until_deletion".
+fields:
+
+  - field: user.email
+    purpose: Reachability, account identity, passkey binding, invite matching
+    classification: pii
+    retention: until_deletion
+    deletion: On verified user request or account closure; cascade to derived caches
+    system_of_record: User table (Postgres)
+    downstream_processors: [auth_provider, event_sink, email_delivery]
+    audit_event: pii_accessed
+
+  - field: user.email_verified
+    purpose: Gate linking/recovery; prevent unverified-email account takeover
+    classification: internal
+    retention: until_deletion
+    deletion: With user record
+    system_of_record: User table
+    downstream_processors: [auth_provider]
+    audit_event: none
+
+  - field: authcredential.public_key
+    purpose: Verify passkey assertions
+    classification: internal
+    retention: until_deletion
+    deletion: On credential removal or account closure
+    system_of_record: AuthCredential table
+    downstream_processors: [auth_provider]
+    audit_event: credential_changed
+
+  - field: device.fingerprint
+    purpose: Risk signal, device recognition, recovery anomaly scoring
+    classification: pii
+    retention: P13M
+    deletion: Rolling expiry after 13 months of inactivity
+    system_of_record: Device table
+    downstream_processors: [risk_engine]
+    audit_event: pii_accessed
+
+  - field: profile.full_name
+    purpose: Personalization, team display, invoices
+    classification: pii
+    retention: until_deletion
+    deletion: With user record or on request
+    system_of_record: User/Profile table
+    downstream_processors: [event_sink_hashed]
+    audit_event: pii_accessed
+
+  - field: profile.company
+    purpose: B2B context, domain auto-join, enrichment
+    classification: internal
+    retention: until_deletion
+    deletion: With org or user record
+    system_of_record: Organization table
+    downstream_processors: [enrichment_vendor]
+    audit_event: none
+
+  - field: identityverification.proofing_result
+    purpose: Satisfy KYC / regulated-activity gate (Tier 3)
+    classification: regulated
+    retention: P5Y            # align to BSA recordkeeping where applicable
+    deletion: Per regulatory retention; not user-deletable while obligation stands
+    system_of_record: IdentityVerification table
+    downstream_processors: [identity_vendor, compliance]
+    audit_event: identity_accessed
+
+  - field: identityverification.vendor_ref
+    purpose: Re-fetch / audit the verification at the vendor without storing raw documents
+    classification: regulated
+    retention: P5Y
+    deletion: Per regulatory retention
+    system_of_record: IdentityVerification table
+    downstream_processors: [identity_vendor]
+    audit_event: identity_accessed
+    note: Raw ID images and selfies are NOT stored in-app; vendor holds them.
+
+  - field: kybverification.beneficial_owners
+    purpose: KYB / AML beneficial ownership
+    classification: regulated
+    retention: P5Y
+    deletion: Per regulatory retention
+    system_of_record: KybVerification table
+    downstream_processors: [kyb_vendor, compliance]
+    audit_event: identity_accessed
+
+  - field: paymentmethod.last4
+    purpose: Display + dunning; full PAN never stored (processor-tokenized)
+    classification: pii
+    retention: until_subscription_end + P2Y
+    deletion: With billing record per finance retention
+    system_of_record: Stripe (token); last4 mirrored in PaymentMethod table
+    downstream_processors: [billing_provider]
+    audit_event: pii_accessed
+
+  - field: consent.*
+    purpose: Prove lawful basis and consent state over time
+    classification: internal
+    retention: P7Y
+    deletion: Retained as compliance evidence beyond account deletion
+    system_of_record: Consent table
+    downstream_processors: []
+    audit_event: consent_changed
+
+# Healthcare overlay (enable only under HIPAA signoff)
+phi_overlay:
+  enabled: false
+  requires_signoff: true
+  rule: >
+    Any field carrying PHI is classification: regulated, minimum-necessary access,
+    audit_event: phi_accessed on every read/write, retention >= P6Y,
+    and every downstream_processor must have a signed BAA before go-live.
+
+# Children/education overlay (enable only under COPPA/FERPA signoff)
+minor_overlay:
+  enabled: false
+  requires_signoff: true
+  rule: >
+    If subject is under the COPPA age threshold, collect NO personal data until
+    verifiable parental consent is recorded; no behavioral advertising; default to
+    most-restrictive processing; support parent-initiated deletion.
