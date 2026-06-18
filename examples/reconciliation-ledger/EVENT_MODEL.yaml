@@ -1,0 +1,88 @@
+# EVENT_MODEL.yaml — reconciliation ledger (worked example)
+version: 1
+
+conventions:
+  naming: "past_tense — <noun>_<verb>"
+  envelope: { event_id: uuid, occurred_at: timestamp, org_id: string, actor_id: string, version: int }
+  pii: "ids and hashes only"
+  ordering: "append-only; consumers tolerate at-least-once delivery"
+
+events:
+
+  entry_ingested:
+    producer: ingest service
+    consumer: [normalizer, observability]
+    schema: { entry_id: string, source_id: string, external_ref: string, amount_minor: int, currency: string, value_date: date }
+    idempotency: "(org_id, source_id, external_ref)"
+    retention: forever
+    drives_invariant: INV-5
+
+  entry_normalized:
+    producer: normalizer
+    consumer: [matcher]
+    schema: { entry_id: string, period_id: string, amount_minor: int, currency: string }
+    idempotency: "entry_id + version"
+    retention: forever
+    drives_invariant: none
+
+  entry_matched:
+    producer: "matcher (ledger_entry: normalized->matched)"
+    consumer: [ledger, observability]
+    schema: { entry_id: string, match_id: string, residual_minor: int }
+    idempotency: "match_id + entry_id"
+    retention: forever
+    drives_invariant: INV-1
+
+  exception_opened:
+    producer: "matcher (ledger_entry: normalized->exception_open)"
+    consumer: [exception_queue, observability]
+    schema: { exception_id: string, entry_ids: "int[]", reason: string, materiality: string }
+    idempotency: "exception_id"
+    retention: forever
+    drives_invariant: INV-1, INV-6
+
+  exception_resolved:
+    producer: exception service
+    consumer: [period_close, observability]
+    schema: { exception_id: string, resolution_ref: string }
+    idempotency: "exception_id + state"
+    retention: forever
+    drives_invariant: INV-6
+
+  entry_carried_forward:
+    producer: period service
+    consumer: [next_period, observability]
+    schema: { entry_id: string, origin_period_id: string, target_period_id: string }
+    idempotency: "entry_id + target_period_id"
+    retention: forever
+    drives_invariant: INV-9
+
+  adjustment_posted:
+    producer: "ledger (adjustment: ->posted)"
+    consumer: [general_ledger, observability]
+    schema: { adj_id: string, lines: "object[]", period_id: string, reverses_adj_id: "string|null" }
+    idempotency: "adj_id"
+    retention: forever
+    drives_invariant: INV-3, INV-4
+
+  period_closed:
+    producer: "period service (period: closing->closed)"
+    consumer: [freeze, reporting, observability]
+    schema: { period_id: string, closed_by: string, closed_at: timestamp }
+    idempotency: "period_id"
+    retention: forever
+    drives_invariant: INV-6, INV-7
+
+  period_reopened:
+    producer: "period service (period: closed->reopened)"
+    consumer: [unfreeze, audit, observability]
+    schema: { period_id: string, reopened_by: string, reason: string }
+    idempotency: "period_id + version"
+    retention: forever
+    drives_invariant: INV-7
+
+# Remaining transition events (run_started, ingest_complete, matching_complete,
+# run_balanced/unbalanced, run_reopened, run_failed, adjustment_submitted/
+# approved/rejected/reversed, exception_claimed/waived/escalated/closed) follow
+# the same envelope + schema convention and are emitted by the transitions named
+# in STATE_MACHINES.yaml. Add them here as consumers are wired.
