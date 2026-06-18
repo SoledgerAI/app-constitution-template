@@ -1,0 +1,81 @@
+# INVARIANTS.yaml — reconciliation ledger (worked example)
+version: 1
+
+severity_levels:
+  critical: "Correctness, financial, or security integrity. Stop-the-line."
+  high:     "Serious but recoverable. Review / queue."
+  medium:   "Quality signal. Log / trend."
+
+invariants:
+
+  INV-1:
+    severity: critical
+    statement: "Every entry in a completed run belongs to exactly one MatchSet or exactly one Exception — nothing lost, nothing double-counted."
+    scope: ReconciliationRun
+    enforced_at: matching_complete
+    observable_as: unassigned_entries
+    on_violation: halt
+
+  INV-2:
+    severity: critical
+    statement: "A MatchSet balances: its residual is within tolerance."
+    scope: MatchSet
+    enforced_at: match_create
+    observable_as: out_of_tolerance_matches
+    on_violation: reject
+
+  INV-3:
+    severity: critical
+    statement: "Every posted Adjustment balances: total debits equal total credits."
+    scope: Adjustment
+    enforced_at: adjustment_post
+    observable_as: unbalanced_adjustment_attempts
+    on_violation: reject
+
+  INV-4:
+    severity: critical
+    statement: "Posted entries and adjustments are immutable; corrections are new postings."
+    scope: LedgerEntry, Adjustment
+    enforced_at: repository
+    observable_as: immutability_violation_attempts
+    on_violation: reject
+
+  INV-5:
+    severity: high
+    statement: "(org_id, source_id, external_ref) is unique; re-ingest is a no-op."
+    scope: LedgerEntry
+    enforced_at: ingest
+    observable_as: duplicate_ingest_rate
+    on_violation: reject
+
+  INV-6:
+    severity: critical
+    statement: "A period cannot close while exceptions above materiality remain unresolved or unwaived."
+    scope: Period
+    enforced_at: period_close
+    observable_as: material_open_exceptions_at_close
+    on_violation: reject
+
+  INV-7:
+    severity: critical
+    statement: "Entries and matches in a closed period are frozen; reopening requires Tier 4 and is audited."
+    scope: Period
+    enforced_at: write
+    observable_as: frozen_write_attempts
+    on_violation: reject
+
+  INV-8:
+    severity: critical
+    statement: "Every entity carries org_id; no cross-tenant reference exists."
+    scope: all
+    enforced_at: repository
+    observable_as: cross_tenant_access_attempts
+    on_violation: halt
+
+  INV-9:
+    severity: high
+    statement: "An entry's value_date is within its period range unless carried_forward with an origin link."
+    scope: LedgerEntry
+    enforced_at: entry_create
+    observable_as: out_of_period_entries
+    on_violation: review
