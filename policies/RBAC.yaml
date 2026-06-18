@@ -1,0 +1,51 @@
+# RBAC.yaml
+# Roles, permissions, and the tier gate per permission.
+# Enforce server-side on every endpoint. Client-side gating is cosmetic only.
+# Admin-class permissions require AAL3 (tier 4) regardless of role.
+
+version: 1
+
+roles:
+  owner:
+    description: Full control of the org, including billing and deletion
+    inherits: [admin]
+  admin:
+    description: Manage members, roles, settings, integrations
+    inherits: [member]
+  member:
+    description: Use the product, create and edit own work
+    inherits: [viewer]
+  viewer:
+    description: Read-only access
+    inherits: []
+  guest:
+    description: Time-boxed external collaborator, scoped to shared items
+    inherits: []
+
+# permission -> { roles allowed, minimum tier }
+permissions:
+  workspace.read:        { roles: [viewer, member, admin, owner, guest], min_tier: 0 }
+  workspace.create:      { roles: [member, admin, owner],                min_tier: 1 }
+  workspace.edit_own:    { roles: [member, admin, owner],                min_tier: 1 }
+  workspace.edit_any:    { roles: [admin, owner],                        min_tier: 2 }
+  member.invite:         { roles: [admin, owner],                        min_tier: 2 }
+  member.remove:         { roles: [admin, owner],                        min_tier: 4 }
+  role.grant_member:     { roles: [admin, owner],                        min_tier: 2 }
+  role.grant_admin:      { roles: [owner],                               min_tier: 4 }
+  billing.manage:        { roles: [owner],                               min_tier: 2 }
+  security.manage:       { roles: [owner, admin],                        min_tier: 4 }
+  sso_scim.configure:    { roles: [owner, admin],                        min_tier: 4 }
+  money.move:            { roles: [owner, admin],                        min_tier: 3 }
+  transfer.large:        { roles: [owner],                               min_tier: 4 }
+  agent.authorize:       { roles: [owner],                               min_tier: 4 }
+  data.export:           { roles: [admin, owner],                        min_tier: 2 }
+  org.delete:            { roles: [owner],                               min_tier: 4 }
+
+rules:
+  - All admin-class permissions (role.grant_admin, member.remove, security.manage,
+    sso_scim.configure, transfer.large, agent.authorize, org.delete) require AAL3.
+  - A role grant never raises a user's tier; the user must independently clear the
+    tier the permission requires (enforced by risk.evaluate at call time).
+  - guest cannot be granted any permission above workspace.read on shared items.
+  - SCIM-provisioned roles are authoritative; manual role edits are disabled when
+    scim_enabled is true for the org.
