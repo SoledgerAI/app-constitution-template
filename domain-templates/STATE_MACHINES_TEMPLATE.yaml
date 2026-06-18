@@ -1,0 +1,39 @@
+# STATE_MACHINES.yaml — TEMPLATE
+# One block per stateful entity. Fill every field. A transition with no guard and
+# no effect is suspicious — most real transitions have at least one.
+# Validate: every state is reachable; every terminal state is intended; every
+# event named here exists in /app EVENTS.yaml or is registered as a domain event.
+
+version: 1
+
+# ---- schema (delete in your copy; here for reference) ----
+# <entity_key>:
+#   description: <what this entity is>
+#   states: [<state>, ...]            # all legal states
+#   initial: <state>                  # exactly one
+#   terminal: [<state>, ...]          # states with no outgoing transition
+#   transitions:
+#     - { from: <state>, to: <state>, event: <event_name>,
+#         guard: "<condition that must hold>",
+#         effect: "<side effect / what changes>",
+#         emits: <event_from_EVENTS.yaml or domain event>,
+#         authority: "<domain action key from DOMAIN_RULES.authority_map, or none>" }
+#   forbidden_transitions:            # explicitly illegal, asserted in tests
+#     - { from: <state>, to: <state>, reason: "<why this must never happen>" }
+#   idempotent_events: [<event>, ...] # re-delivering these must not double-apply
+# ----------------------------------------------------------
+
+entities:
+
+  "<entity_key>":
+    description: "<what this entity is>"
+    states: ["<state_a>", "<state_b>", "<terminal_state>"]
+    initial: "<state_a>"
+    terminal: ["<terminal_state>"]
+    transitions:
+      - { from: "<state_a>", to: "<state_b>", event: "<event_name>",
+          guard: "<condition>", effect: "<what changes>",
+          emits: "<event>", authority: "<action_key or none>" }
+    forbidden_transitions:
+      - { from: "<terminal_state>", to: "<state_a>", reason: "<why illegal>" }
+    idempotent_events: ["<event_name>"]
