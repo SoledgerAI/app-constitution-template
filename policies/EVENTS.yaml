@@ -1,0 +1,149 @@
+# EVENTS.yaml
+# Canonical event contract. Emit these exact names with these exact properties
+# at the points described. Metrics are computed ONLY from these events.
+# Never place secrets or raw PII in properties — ids and hashes only.
+
+version: 1
+
+events:
+
+  - name: acquisition_started
+    when: Visitor hits the landing CTA / /start
+    properties:
+      utm_source: string?
+      referrer: string?
+      bot_score: number
+    feeds: [top_of_funnel]
+
+  - name: signup_initiated
+    when: User begins account creation
+    properties:
+      method: enum[passkey, sso, otp]
+    feeds: [visitor_to_signup]
+
+  - name: auth_method_set
+    when: A credential is enrolled
+    properties:
+      method: enum[passkey, sso, otp]
+      aal: enum[0, 2, 3]
+      device_bound: boolean
+    feeds: [passkey_adoption]
+
+  - name: email_verified
+    when: Email ownership confirmed
+    properties:
+      user_id: string
+    feeds: [account_quality]
+
+  - name: activation_reached
+    when: User completes the guided first-value action
+    properties:
+      user_id: string
+      time_since_acquisition_ms: number
+    feeds: [signup_to_activation, time_to_value_p50, time_to_value_p90]
+
+  - name: tier_changed
+    when: A user's tier increases or decreases
+    properties:
+      user_id: string
+      from_tier: number
+      to_tier: number
+      trigger: string
+    feeds: [ladder_progression]
+
+  - name: step_up_challenged
+    when: risk.evaluate returns STEP_UP
+    properties:
+      user_id: string
+      action: string
+      required_tier: number
+    feeds: [friction_at_gates]
+
+  - name: step_up_passed
+    when: User clears a step-up challenge
+    properties:
+      user_id: string
+      action: string
+      to_tier: number
+    feeds: [friction_at_gates]
+
+  - name: identity_verification
+    when: IDV completes (any result)
+    properties:
+      user_id: string
+      method: enum[vc, mdl, doc_liveness]
+      result: enum[passed, failed, review]
+      duration_ms: number
+    feeds: [verify_time, auto_pass_rate]
+
+  - name: fallback_triggered
+    when: Any auth step falls back from the primary path
+    properties:
+      step: string
+      reason: string
+    feeds: [auth_fallback_rate]      # KEY auth-health metric
+
+  - name: recovery_initiated
+    when: Account recovery begins
+    properties:
+      user_id: string
+      method: string
+      anomaly_score: number
+    feeds: [recovery_abuse_rate]
+
+  - name: recovery_completed
+    when: Recovery succeeds
+    properties:
+      user_id: string
+      method: string
+      fallback_used: boolean
+    feeds: [recovery_abuse_rate]
+
+  - name: invite_sent
+    when: A member sends an org invite
+    properties:
+      org_id: string
+      role: string
+      channel: enum[email, link]
+    feeds: [b2b_viral_coefficient]
+
+  - name: invite_accepted
+    when: An invitee joins
+    properties:
+      org_id: string
+      role: string
+    feeds: [b2b_viral_coefficient]
+
+  - name: account_linked
+    when: A second auth method is linked to an existing account
+    properties:
+      user_id: string
+      primary_method: string
+      linked_method: string
+    feeds: [identity_hygiene]
+
+  - name: subscription_started
+    when: Trial converts or a paid plan begins
+    properties:
+      org_id: string
+      plan: string
+      mrr: number
+      trial_converted: boolean
+    feeds: [activation_to_paid]
+
+  - name: dead_end
+    when: A flow reaches a state with no forward path (SHOULD NEVER FIRE)
+    properties:
+      step: string
+      state: string
+    feeds: [dead_end_count]          # must equal zero
+
+metrics:
+  time_to_value_p50:   { target: "< 60s", from: acquisition_started, to: activation_reached, agg: p50 }
+  time_to_value_p90:   { report: true,    from: acquisition_started, to: activation_reached, agg: p90 }
+  auth_fallback_rate:  { target: "< 5%",  formula: "fallback_triggered / auth_events" }
+  dead_end_count:      { target: "0",     formula: "count(dead_end)" }
+  signup_to_activation: { cadence: weekly, formula: "activation_reached / signup_initiated" }
+  activation_to_paid:  { cadence: weekly, formula: "subscription_started / activation_reached" }
+  recovery_abuse_rate: { cadence: monthly,formula: "flagged(recovery_initiated) / recovery_initiated" }
+  privileged_ato:      { target: "0", severity: critical, source: "tier>=3 security incidents" }
