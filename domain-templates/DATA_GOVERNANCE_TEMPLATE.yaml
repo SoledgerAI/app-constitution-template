@@ -1,0 +1,26 @@
+# DATA_GOVERNANCE.yaml — TEMPLATE
+# Governance coverage for the protected data declared in DOMAIN_RULES.yaml
+# `data_fields:`. Same discipline as the rest of the constitution: this is config,
+# and the constitution gate (ci/constitution_validate.py, check #7) fails the build
+# when a declared item is not answered here.
+#
+#   - every `sensitive_fields` entry  -> a `fields:` entry with classification,
+#                                        purpose, and retention (all required)
+#   - every `tenant_scoped_entities`  -> an `entities:` note (or an explicit
+#                                        <Entity>.org_id field entry)
+
+version: 1
+
+# Per-field governance for personal / sensitive / regulated data.
+fields:
+  "<Entity.attribute>":
+    classification: "<personal | sensitive | regulated>"   # required
+    purpose: "<why this data is collected / why it exists>" # required
+    retention: "<how long it is kept, and what triggers deletion>"  # required
+    access: "<who may read it / how it is exposed>"         # optional but encouraged
+
+# Per-entity tenancy notes for org_id-bearing entities.
+entities:
+  "<Entity>":
+    tenant_scope: org_id
+    note: "<how row-level org isolation is enforced for this entity>"  # required

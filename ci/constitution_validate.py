@@ -171,7 +171,9 @@ def check_no_placeholders(packages: list[Path], res: Result) -> None:
                 continue
             for token in PLACEHOLDERS:
                 if re.search(rf"\b{re.escape(token)}\b", text):
-                    res.warn(f"[PLACEHOLDER] '{token}' in {path}")
+                    # checks.md #9: a package carrying unresolved domain logic
+                    # "may not proceed" -- this is a gate failure, not a nit.
+                    res.error(f"[PLACEHOLDER] '{token}' in {path}")
 
 
 # --------------------------------------------------------------------------- #
@@ -209,6 +211,11 @@ def check_invariant_consistency(pkg: Path, res: Result) -> None:
     rules_blob = load_yaml(dom / "DOMAIN_RULES.yaml", res)
     inv = normalize_invariants(inv_blob)
     rules = normalize_invariants(rules_blob)
+    # A constitution with no invariants is not a spec the gate can vouch for.
+    if not inv:
+        res.error(f"[INV-DRIFT] {pkg.name}: INVARIANTS.yaml declares no invariants")
+    if not rules:
+        res.error(f"[INV-DRIFT] {pkg.name}: DOMAIN_RULES.yaml declares no invariants")
     if not inv or not rules:
         return
 
@@ -273,18 +280,59 @@ def _defined_events(pkg: Path, res: Result) -> set[str]:
     return defined
 
 
+def _declared_triggers(pkg: Path, res: Result) -> set[str]:
+    """Triggers live in their OWN namespace, separate from events. A trigger is the
+    command/cause that drives a transition; it does not have to emit an event. They
+    are declared under `triggers:` in EVENT_MODEL.yaml (and optionally onboarding/
+    EVENTS.yaml), as either a map {name: {...}} or a list."""
+    declared: set[str] = set()
+
+    def absorb(blob) -> None:
+        trig = blob.get("triggers") if isinstance(blob, dict) else None
+        if isinstance(trig, dict):
+            declared.update(map(str, trig.keys()))
+        elif isinstance(trig, list):
+            for t in trig:
+                if isinstance(t, dict) and t.get("name"):
+                    declared.add(str(t["name"]))
+                elif isinstance(t, str):
+                    declared.add(t)
+
+    absorb(load_yaml(domain_dir(pkg) / "EVENT_MODEL.yaml", res))
+    onboarding_events = pkg / "onboarding" / "EVENTS.yaml"
+    if onboarding_events.exists():
+        absorb(load_yaml(onboarding_events, res))
+    return declared
+
+
 def check_event_consistency(pkg: Path, res: Result) -> None:
+    """Triggers and events are SEPARATE namespaces (the constitution's trigger/event
+    separation). A transition's `event:` is the trigger that fires it; its `emits:`
+    is the event it produces -- which may legitimately be null. So:
+      * every `emits:` value must be a defined event  (events: in EVENT_MODEL.yaml)
+      * every transition `event:` must be a declared trigger  (triggers: there)
+    A trigger that emits null is valid and must never warn; a trigger is NOT
+    required to have a matching events: entry."""
     sm = load_yaml(domain_dir(pkg) / "STATE_MACHINES.yaml", res)
     defined = _defined_events(pkg, res)
+    declared = _declared_triggers(pkg, res)
+    emitted = _emitted_events_from_state_machines(sm)       # already excludes null
+    triggers = _trigger_events_from_state_machines(sm)
+
+    # An empty event model / triggerless state machine is not a passing spec.
     if not defined:
-        res.warn(f"[EVENTS] {pkg.name}: no events defined in EVENT_MODEL.yaml")
-        return
-    # Hard rule: anything actually emitted must be defined.
-    for ev in sorted(_emitted_events_from_state_machines(sm) - defined):
-        res.error(f"[EVENTS] {pkg.name}: emitted event '{ev}' is not defined in the event model")
-    # Soft rule: transition triggers that aren't modeled yet (the example admits this).
-    for ev in sorted(_trigger_events_from_state_machines(sm) - defined):
-        res.warn(f"[EVENTS] {pkg.name}: transition trigger '{ev}' has no event-model entry yet")
+        res.error(f"[EVENTS] {pkg.name}: no events defined in EVENT_MODEL.yaml")
+    if not triggers:
+        res.error(f"[EVENTS] {pkg.name}: no transition triggers declared in STATE_MACHINES.yaml")
+
+    # Hard rule: every emitted event must be defined in the event model.
+    for ev in sorted(emitted - defined):
+        res.error(f"[EVENTS] {pkg.name}: emitted event '{ev}' is not defined in EVENT_MODEL.yaml events:")
+
+    # Hard rule: every transition trigger must be declared in the trigger namespace.
+    # (This is the "undeclared trigger" gate -- emitting null does not exempt it.)
+    for ev in sorted(triggers - declared):
+        res.error(f"[EVENTS] {pkg.name}: transition trigger '{ev}' is not declared in EVENT_MODEL.yaml triggers:")
 
 
 def _authority_permissions(rules_blob) -> set[str]:
@@ -298,14 +346,24 @@ def _authority_permissions(rules_blob) -> set[str]:
     return perms
 
 
+def _rbac_path(pkg: Path) -> Path:
+    """App instances keep RBAC under onboarding/; flat worked examples keep it
+    beside the domain artifacts (they have no onboarding/ dir). The old code only
+    ever looked under onboarding/, so a flat example's RBAC was never found and
+    its authority_map went perpetually unverified."""
+    if is_app_instance(pkg):
+        return pkg / "onboarding" / "RBAC.yaml"
+    return domain_dir(pkg) / "RBAC.yaml"
+
+
 def check_seam_consistency(pkg: Path, res: Result) -> None:
     rules_blob = load_yaml(domain_dir(pkg) / "DOMAIN_RULES.yaml", res)
     perms = _authority_permissions(rules_blob)
-    rbac_path = pkg / "onboarding" / "RBAC.yaml"
+    rbac_path = _rbac_path(pkg)
     if not rbac_path.exists():
         if perms:
             res.warn(f"[SEAM] {pkg.name}: authority_map defines {len(perms)} permission(s) "
-                     f"but no onboarding/RBAC.yaml is present to verify them against")
+                     f"but no {rbac_path.name} is present to verify them against")
         return
     rbac = load_yaml(rbac_path, res)
     declared = set((rbac or {}).get("permissions", {}).keys()) if isinstance(rbac, dict) else set()
@@ -333,17 +391,171 @@ def check_invariant_observability(pkg: Path, res: Result) -> None:
                 res.warn(f"[OBSERVE] {pkg.name}: {inv_id} is critical but no 'Critical' alert found")
 
 
+# A field/entity is "governed" when the package declares it carries data in one of
+# these classes. Tenancy is the org_id-bearing case; the rest are PII-shaped.
+GOVERNED_CLASSES = ("personal", "sensitive", "regulated", "tenant")
+# Minimum a governance entry must answer for a declared-sensitive field.
+REQUIRED_GOV_KEYS = ("classification", "purpose", "retention")
+
+
+def _governance_path(pkg: Path) -> Path:
+    """App instances keep governance under onboarding/ (the seam owns data policy);
+    flat worked examples keep it beside the domain artifacts."""
+    if is_app_instance(pkg):
+        return pkg / "onboarding" / "DATA_GOVERNANCE.yaml"
+    return domain_dir(pkg) / "DATA_GOVERNANCE.yaml"
+
+
+def _data_field_declarations(pkg: Path, res: Result) -> tuple[list[dict], list[str]]:
+    """Read the optional `data_fields:` block from DOMAIN_RULES.yaml.
+
+    Convention (see ci/constitution-checks.md #7):
+        data_fields:
+          sensitive_fields:
+            - field: Entity.attribute
+              classification: personal | sensitive | regulated
+          tenant_scoped_entities:
+            - Entity            # an entity that carries org_id
+
+    Returns (sensitive_fields, tenant_scoped_entities)."""
+    rules = load_yaml(domain_dir(pkg) / "DOMAIN_RULES.yaml", res)
+    decl = rules.get("data_fields") if isinstance(rules, dict) else None
+    sensitive: list[dict] = []
+    tenant: list[str] = []
+    if isinstance(decl, dict):
+        for item in decl.get("sensitive_fields") or []:
+            if isinstance(item, dict) and item.get("field"):
+                sensitive.append(item)
+        for ent in decl.get("tenant_scoped_entities") or []:
+            tenant.append(str(ent))
+    return sensitive, tenant
+
+
+def _modeled_entities(dom: Path) -> dict[str, bool | None]:
+    """Parse DOMAIN_MODEL.md's Entities section for the entity universe.
+
+    Every `### <Name>` heading under the `## ... Entities` heading is a modeled
+    entity. Its `Tenancy:` tag (when present) is captured as True (yes) / False
+    (no) / None (unstated). The header name is normalized: '### Adjustment
+    (journal entry)' -> 'Adjustment'. This is the SOURCE OF TRUTH for which
+    entities exist; a hand-authored list is only ever cross-checked against it."""
+    path = dom / "DOMAIN_MODEL.md"
+    out: dict[str, bool | None] = {}
+    if not path.exists():
+        return out
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return out
+
+    in_entities = False
+    current: str | None = None
+    buf: list[str] = []
+
+    def flush() -> None:
+        nonlocal current, buf
+        if current is not None:
+            block = "\n".join(buf)
+            m = re.search(r"Tenancy.*?\b(yes|no)\b", block, re.IGNORECASE | re.DOTALL)
+            out[current] = (m.group(1).lower() == "yes") if m else None
+        current, buf = None, []
+
+    for line in text.splitlines():
+        if re.match(r"##\s+", line):                 # a `## ` section heading
+            flush()
+            in_entities = "entit" in line.lower()
+            continue
+        h3 = re.match(r"###\s+(.*)", line)
+        if h3:
+            flush()
+            if in_entities:
+                name = re.sub(r"[`*]", "", h3.group(1).split("(")[0]).strip()
+                current = name or None
+            continue
+        if current is not None:
+            buf.append(line)
+    flush()
+    return out
+
+
+def _tenancy_is_universal(pkg: Path, res: Result) -> bool:
+    """True when any invariant has scope `all` (e.g. INV-8: 'every entity carries
+    org_id'). In that case every modeled entity is tenant-scoped, regardless of
+    its own Tenancy tag."""
+    dom = domain_dir(pkg)
+    for fname in ("INVARIANTS.yaml", "DOMAIN_RULES.yaml"):
+        for body in normalize_invariants(load_yaml(dom / fname, res)).values():
+            if str(body.get("scope", "")).strip().lower() == "all":
+                return True
+    return False
+
+
 def check_data_governance(pkg: Path, res: Result) -> None:
-    """Only meaningful for full app instances; the worked example has no onboarding."""
-    if not is_app_instance(pkg):
+    """Coverage, not mere presence. Every field the package declares as
+    personal/sensitive/regulated must carry a complete DATA_GOVERNANCE.yaml entry
+    (classification + purpose + retention), and every org_id-bearing entity must
+    carry a tenancy governance note. A governance file that merely exists proves
+    nothing about whether the protected data is actually accounted for.
+
+    The tenant-entity universe is DERIVED from DOMAIN_MODEL.md (plus INV-8-style
+    scope:all), not trusted from the hand-authored data_fields list -- that list
+    is folded in as an additional check target so it can't go stale silently."""
+    sensitive, tenant_hand = _data_field_declarations(pkg, res)
+
+    # Derive the set of entities that require a tenancy note.
+    modeled = _modeled_entities(domain_dir(pkg))
+    universal = _tenancy_is_universal(pkg, res)
+    tenant_required: set[str] = set(tenant_hand)
+    for name, tenancy in modeled.items():
+        if universal or tenancy is True:
+            tenant_required.add(name)
+
+    # Nothing protected -> nothing to cross-check. App instances handling real
+    # users almost always have protected data, so flag the silence there.
+    if not sensitive and not tenant_required:
+        if is_app_instance(pkg):
+            res.warn(f"[GOVERN] {pkg.name}: no sensitive fields or tenant-scoped entities "
+                     f"found -- confirm the app truly handles no personal/tenant data")
         return
-    gov_path = pkg / "onboarding" / "DATA_GOVERNANCE.yaml"
+
+    gov_path = _governance_path(pkg)
     if not gov_path.exists():
-        res.error(f"[GOVERN] {pkg.name}: onboarding/DATA_GOVERNANCE.yaml missing")
+        res.error(f"[GOVERN] {pkg.name}: package has governed data "
+                  f"({len(sensitive)} sensitive field(s), {len(tenant_required)} tenant-scoped "
+                  f"entity(ies)) but {gov_path.name} is missing")
         return
+
     gov = load_yaml(gov_path, res)
-    if not (isinstance(gov, dict) and gov.get("fields")):
-        res.warn(f"[GOVERN] {pkg.name}: DATA_GOVERNANCE.yaml has no field entries")
+    fields = gov.get("fields") if isinstance(gov, dict) else None
+    entities = gov.get("entities") if isinstance(gov, dict) else None
+    fields = fields if isinstance(fields, dict) else {}
+    entities = entities if isinstance(entities, dict) else {}
+
+    # (a) Every declared-sensitive field needs a complete governance entry.
+    for item in sensitive:
+        name = str(item["field"])
+        entry = fields.get(name)
+        if not isinstance(entry, dict):
+            cls = item.get("classification", "sensitive")
+            res.error(f"[GOVERN] {pkg.name}: field '{name}' is declared {cls} "
+                      f"but has no entry in {gov_path.name}")
+            continue
+        missing = [k for k in REQUIRED_GOV_KEYS if not str(entry.get(k, "")).strip()]
+        if missing:
+            res.error(f"[GOVERN] {pkg.name}: governance entry for '{name}' is "
+                      f"missing {', '.join(missing)}")
+
+    # (b) Every tenant-scoped (org_id-bearing) entity needs a governance note.
+    #     tenant_required is derived from DOMAIN_MODEL.md, so a new entity added
+    #     there is caught even if nobody updated data_fields.tenant_scoped_entities.
+    for ent in sorted(tenant_required):
+        note = entities.get(ent)
+        has_note = isinstance(note, dict) and bool(str(note.get("note", "")).strip())
+        # An explicit per-field org_id entry counts as covering tenancy too.
+        has_field = isinstance(fields.get(f"{ent}.org_id"), dict)
+        if not has_note and not has_field:
+            res.error(f"[GOVERN] {pkg.name}: tenant-scoped entity '{ent}' (org_id) "
+                      f"has no governance note in {gov_path.name}")
 
 
 # --------------------------------------------------------------------------- #

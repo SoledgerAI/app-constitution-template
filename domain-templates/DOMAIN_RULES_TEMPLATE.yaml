@@ -35,3 +35,17 @@ authority_map:
 #    formula that defines them (so they can't drift between callers).
 derived:
   "<computed_value>": "<formula in terms of entity fields>"
+
+# 5) Data governance declaration — which data is protected. Declare it once here;
+#    govern it once in DATA_GOVERNANCE.yaml. The constitution gate
+#    (ci/constitution-checks.md #7) fails the build if anything listed here lacks a
+#    complete governance entry. Omit a sub-list if it does not apply.
+data_fields:
+  sensitive_fields:                     # personal / sensitive / regulated
+    - field: "<Entity.attribute>"
+      classification: "<personal | sensitive | regulated>"
+  # OPTIONAL: tenancy is derived from DOMAIN_MODEL.md (entity headers + Tenancy
+  # tags, and any invariant with scope: all). List entities here only to add an
+  # explicit check target; the derived universe is the source of truth.
+  tenant_scoped_entities:
+    - "<Entity>"

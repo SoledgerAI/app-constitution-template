@@ -1,0 +1,32 @@
+# RBAC.yaml — reconciliation ledger (worked example)
+# The six domain permissions registered by this package's authority_map
+# (DOMAIN_RULES.yaml). In a real app these are appended to the central /app
+# RBAC.yaml so the same server-side checker enforces them; the worked example
+# carries them here so the constitution gate can verify the seam. min_tier mirrors
+# authority_map exactly — if they drift, the seam check fails the build.
+version: 1
+
+roles:
+  recon_operator:
+    description: Runs reconciliations and works match sets / exceptions.
+    inherits: []
+  recon_approver:
+    description: Approves large adjustments, waives exceptions, closes periods.
+    inherits: [recon_operator]
+  recon_admin:
+    description: Reopens closed periods (Tier 4, fully audited).
+    inherits: [recon_approver]
+
+# permission -> { roles allowed, minimum tier } — keyed exactly as authority_map.
+permissions:
+  recon.run:             { roles: [recon_operator, recon_approver, recon_admin], min_tier: 1 }
+  recon.match:           { roles: [recon_operator, recon_approver, recon_admin], min_tier: 2 }
+  recon.post_adjustment: { roles: [recon_operator, recon_approver, recon_admin], min_tier: 2 }
+  recon.waive_exception: { roles: [recon_approver, recon_admin],                 min_tier: 3 }
+  recon.close_period:    { roles: [recon_approver, recon_admin],                 min_tier: 3 }
+  recon.reopen_period:   { roles: [recon_admin],                                 min_tier: 4 }
+
+rules:
+  - recon.reopen_period is admin-class and requires AAL3 (Tier 4) regardless of role.
+  - recon.post_adjustment above auto_post_limit_minor additionally requires a Tier-4
+    approver who is not the author (enforced at call time, see authority_map notes).

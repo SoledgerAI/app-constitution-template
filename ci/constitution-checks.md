@@ -104,16 +104,22 @@ Critical invariants must have alerting.
 
 ### 5. Event consistency
 
-Every event referenced in state machines, domain rules, observability, tests, or implementation plans must be defined in an event file.
+Triggers and events are **separate namespaces**. A state-machine transition's `event:` is the *trigger* — the command or cause that fires the transition; its `emits:` is the *event* — the fact published as a result, which may legitimately be `null` (most lifecycle steps change state without publishing anything). The two are declared in two different blocks of the event model and are checked independently.
 
-Valid event definition locations:
+Two hard rules are enforced (`ci/constitution_validate.py`):
+
+- **Emitted events must be defined.** Every non-null `emits:` value in `STATE_MACHINES.yaml` transitions must appear in `EVENT_MODEL.yaml` `events:`.
+- **Triggers must be declared.** Every transition `event:` (trigger) must appear in `EVENT_MODEL.yaml` `triggers:`. A trigger that emits `null` is valid and is **not** required to have a matching `events:` entry — only a `triggers:` declaration.
+
+Definition locations:
 
 ```txt
-apps/<app>/onboarding/EVENTS.yaml
-apps/<app>/domain/EVENT_MODEL.yaml
+apps/<app>/domain/EVENT_MODEL.yaml      # events: (facts) and triggers: (causes)
+apps/<app>/onboarding/EVENTS.yaml       # may also contribute events:/triggers:
+examples/<example>/EVENT_MODEL.yaml     # flat worked examples
 ```
 
-Undefined emitted events are not allowed.
+Undefined emitted events and undeclared triggers are both ERRORs.
 
 ---
 
@@ -127,11 +133,14 @@ Authority map:
 apps/<app>/domain/DOMAIN_RULES.yaml
 ```
 
-RBAC file:
+RBAC file — its location depends on the package shape:
 
 ```txt
-apps/<app>/onboarding/RBAC.yaml
+apps/<app>/onboarding/RBAC.yaml          # full app instances (the seam owns RBAC)
+examples/<example>/RBAC.yaml             # flat worked examples (beside the domain artifacts)
 ```
+
+Every permission named in the domain `authority_map` is verified against the `permissions:` keys in that RBAC file; an authority_map permission missing from RBAC is an ERROR. (A flat example has no `onboarding/` directory, so the validator resolves its RBAC beside the domain artifacts.)
 
 The domain may read onboarding context, but onboarding must not depend on domain entities, rules, or state machines.
 
@@ -139,13 +148,45 @@ The domain may read onboarding context, but onboarding must not depend on domain
 
 ### 7. PII and data governance coverage
 
-Every personal, sensitive, regulated, or tenant-scoped data field must have a data governance entry.
+Every personal, sensitive, regulated, or tenant-scoped data field must have a data governance entry. This is a **coverage** check, not a presence check — a governance file that merely exists proves nothing.
 
-Governance source:
+**Declaration (low-friction, declare once).** In `DOMAIN_RULES.yaml`, add a `data_fields:` block naming the protected data:
+
+```yaml
+data_fields:
+  sensitive_fields:                 # personal / sensitive / regulated, by Entity.attribute
+    - field: Adjustment.approved_by
+      classification: personal
+  tenant_scoped_entities:           # OPTIONAL — see note below
+    - LedgerEntry
+    - Adjustment
+```
+
+> **Tenancy is derived, not declared.** The validator parses the entity universe from `DOMAIN_MODEL.md` (the `### <Entity>` headings under the Entities section, with their `Tenancy:` tags) and, when any invariant has `scope: all` (e.g. INV-8 "every entity carries org_id"), treats *every* modeled entity as tenant-scoped. So an entity added to `DOMAIN_MODEL.md` is caught even if nobody touched `tenant_scoped_entities`. The hand-list is folded in as an **additional check target** — list an entity there and it must still be governed — but it is never the source of truth, so it cannot go stale silently.
+
+**Governance source.** Each declared item must be answered in the governance file:
 
 ```txt
-apps/<app>/onboarding/DATA_GOVERNANCE.yaml
+apps/<app>/onboarding/DATA_GOVERNANCE.yaml      # full app instances
+examples/<example>/DATA_GOVERNANCE.yaml         # flat worked examples
 ```
+
+```yaml
+fields:                             # one per declared sensitive_field
+  Adjustment.approved_by:
+    classification: personal
+    purpose: "..."                  # required
+    retention: "..."                # required
+entities:                           # one per declared tenant_scoped_entity
+  LedgerEntry:
+    tenant_scope: org_id
+    note: "Row-level org isolation; ..."   # required
+```
+
+Enforcement (`ci/constitution_validate.py`):
+
+- A declared-sensitive field with **no matching `fields:` entry**, or an entry missing **classification / purpose / retention**, is an ERROR.
+- A tenant-scoped (org_id-bearing) entity — **derived from `DOMAIN_MODEL.md`** (plus `scope: all`), not just the hand-list — with **no governance note** (`entities.<Entity>.note`, or an explicit `<Entity>.org_id` field entry) is an ERROR.
 
 Missing governance coverage blocks implementation.
 

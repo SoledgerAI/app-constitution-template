@@ -1,0 +1,46 @@
+# DATA_GOVERNANCE.yaml — reconciliation ledger (worked example)
+# Governance coverage for every field/entity declared in DOMAIN_RULES.yaml
+# `data_fields:`. The constitution gate (ci/constitution_validate.py) fails the
+# build if a declared-sensitive field has no complete entry here, or if a
+# tenant-scoped (org_id-bearing) entity has no tenancy note.
+version: 1
+
+# Per-field governance for personal/sensitive/regulated data. Each entry must
+# answer classification + purpose + retention at minimum.
+fields:
+  Adjustment.approved_by:
+    classification: personal
+    purpose: "Audit trail for who authorized a posted adjustment; segregation-of-duties evidence."
+    retention: "Retained for the life of the ledger record + 7 years (financial audit), then purged."
+    access: "Approvers and auditors only; exposed through the audit log, never bulk-exported."
+
+  Period.closed_by:
+    classification: personal
+    purpose: "Audit trail for who closed a financial period; accountability for the close decision."
+    retention: "Retained for the life of the period record + 7 years (financial audit), then purged."
+    access: "Auditors and finance admins only."
+
+# Per-entity tenancy notes. Every entity carries org_id (INV-8); each is isolated
+# at the row level and may never be referenced across orgs.
+entities:
+  Source:
+    tenant_scope: org_id
+    note: "Row-level org isolation; unique (org_id, name). No cross-org source references."
+  LedgerEntry:
+    tenant_scope: org_id
+    note: "Row-level org isolation; every query is org-scoped (INV-8). Immutable once posted."
+  ReconciliationRun:
+    tenant_scope: org_id
+    note: "Row-level org isolation; a run only ever touches entries in its own org."
+  MatchSet:
+    tenant_scope: org_id
+    note: "Row-level org isolation; entry_ids are constrained to the same org."
+  Exception:
+    tenant_scope: org_id
+    note: "Row-level org isolation; resolution refs stay within the org."
+  Adjustment:
+    tenant_scope: org_id
+    note: "Row-level org isolation; postings and reversals stay within the org."
+  Period:
+    tenant_scope: org_id
+    note: "Row-level org isolation; close/reopen decisions are scoped to the org."

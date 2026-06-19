@@ -81,8 +81,41 @@ events:
     retention: forever
     drives_invariant: INV-7
 
-# Remaining transition events (run_started, ingest_complete, matching_complete,
-# run_balanced/unbalanced, run_reopened, run_failed, adjustment_submitted/
-# approved/rejected/reversed, exception_claimed/waived/escalated/closed) follow
-# the same envelope + schema convention and are emitted by the transitions named
-# in STATE_MACHINES.yaml. Add them here as consumers are wired.
+# Triggers — the commands/causes that drive STATE_MACHINES.yaml transitions.
+# Triggers are a SEPARATE namespace from events: a trigger names *why* a transition
+# fires; `emits` is the event it produces, and null is valid (most lifecycle steps
+# move state without publishing an event). Every transition `event:` in
+# STATE_MACHINES.yaml must appear here — the constitution gate enforces it.
+triggers:
+  # ledger_entry
+  entry_normalized:      { emits: entry_normalized }
+  entry_matched:         { emits: entry_matched }
+  entry_excepted:        { emits: exception_opened }
+  entry_written_off:     { emits: exception_resolved }
+  entry_carried_forward: { emits: entry_carried_forward }
+  # exception
+  exception_resolved:    { emits: exception_resolved }
+  exception_claimed:     { emits: null }
+  exception_waived:      { emits: exception_resolved }
+  exception_escalated:   { emits: null }
+  exception_closed:      { emits: null }
+  # reconciliation_run
+  run_started:           { emits: null }
+  ingest_complete:       { emits: null }
+  matching_complete:     { emits: null }
+  run_balanced:          { emits: null }
+  run_unbalanced:        { emits: null }
+  run_closed:            { emits: null }
+  run_reopened:          { emits: null }
+  run_failed:            { emits: null }
+  # adjustment
+  adjustment_posted:     { emits: null }
+  adjustment_submitted:  { emits: null }
+  adjustment_approved:   { emits: null }
+  adjustment_rejected:   { emits: null }
+  adjustment_reversed:   { emits: null }
+  # period
+  first_run_started:     { emits: null }
+  close_requested:       { emits: null }
+  period_closed:         { emits: null }
+  period_reopened:       { emits: null }
