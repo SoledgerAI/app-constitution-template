@@ -48,6 +48,7 @@ except ImportError:
 class Result:
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
 
     def error(self, msg: str) -> None:
         self.errors.append(msg)
@@ -55,9 +56,15 @@ class Result:
     def warn(self, msg: str) -> None:
         self.warnings.append(msg)
 
+    def note(self, msg: str) -> None:
+        """Informational only -- never affects the gate, even under --strict. Used
+        to make a dormant/inactive check visible instead of silently passing."""
+        self.notes.append(msg)
+
     def merge(self, other: "Result") -> None:
         self.errors.extend(other.errors)
         self.warnings.extend(other.warnings)
+        self.notes.extend(other.notes)
 
 
 PLACEHOLDERS = ["TBD", "TODO", "UNKNOWN", "ASK LATER", "FILL IN", "FIXME"]
@@ -719,6 +726,71 @@ def check_data_governance(pkg: Path, res: Result) -> None:
                       f"has no governance note in {gov_path.name}")
 
 
+# Generated application code lives here, one tree per app instance.
+CODE_DIR = "src"
+# Files worth scanning for hardcoded policy literals.
+CODE_SUFFIXES = {
+    ".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".java", ".kt", ".rb",
+    ".rs", ".cs", ".php", ".scala", ".swift", ".sql",
+}
+
+
+def _policy_literals(rules_blob) -> dict[str, str]:
+    """Flatten the `policies:` block into {policy_name: literal} for the values
+    that make sense to catch hardcoded in source.
+
+    Only numeric thresholds/limits are scanned, and only those with |value| >= 10:
+    a bare 0/1/3 (e.g. amount_tolerance_minor: 0, date_window_days: 3) appears in
+    real code constantly and would make the check cry wolf. Strings like
+    default_currency: USD are skipped for the same reason. The distinctive
+    thresholds -- materiality_minor, auto_post_limit_minor, etc. -- are the ones a
+    leak would actually hardcode, and they are caught."""
+    out: dict[str, str] = {}
+    pol = rules_blob.get("policies") if isinstance(rules_blob, dict) else None
+    if not isinstance(pol, dict):
+        return out
+    for name, val in pol.items():
+        if isinstance(val, bool):
+            continue
+        if isinstance(val, int) or isinstance(val, float):
+            if abs(val) >= 10:
+                out[str(name)] = repr(val) if isinstance(val, float) else str(val)
+    return out
+
+
+def check_policy_externalization(pkg: Path, res: Result) -> None:
+    """Check #8: thresholds, limits, and tiers must live in YAML config, never be
+    hardcoded in generated code. This can only run against generated code, which
+    lives in apps/<app>/src. Until that tree exists the check is DORMANT -- it
+    emits an informational note so its silence never reads as a pass."""
+    if not is_app_instance(pkg):
+        return  # flat worked examples ship no generated code
+    code_dir = pkg / CODE_DIR
+    if not code_dir.is_dir():
+        res.note(f"[POLICY] {pkg.name}: check inactive -- no {CODE_DIR}/ code "
+                 f"directory yet (runs once code is generated)")
+        return
+
+    literals = _policy_literals(load_yaml(domain_dir(pkg) / "DOMAIN_RULES.yaml", res))
+    if not literals:
+        return
+    patterns = {name: (value, re.compile(rf"(?<![\w.]){re.escape(value)}(?![\w.])"))
+                for name, value in literals.items()}
+    for path in sorted(code_dir.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in CODE_SUFFIXES:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        rel = path.relative_to(pkg).as_posix()
+        for name, (value, pat) in patterns.items():
+            if pat.search(text):
+                res.error(f"[POLICY] {pkg.name}: policy '{name}' (={value}) is hardcoded "
+                          f"in {rel}; externalize it to DOMAIN_RULES.yaml policies "
+                          f"and read it from config")
+
+
 # --------------------------------------------------------------------------- #
 # Runner
 # --------------------------------------------------------------------------- #
@@ -748,6 +820,7 @@ def run(root: Path, only_package: str | None) -> Result:
         check_seam_consistency(pkg, res)
         check_invariant_observability(pkg, res)
         check_data_governance(pkg, res)
+        check_policy_externalization(pkg, res)
 
     return res, packages
 
@@ -767,6 +840,11 @@ def main() -> int:
     print(f"  root: {root}")
     print(f"  packages checked: {', '.join(p.name for p in packages) or '(none)'}")
     print("=" * 64)
+
+    if res.notes:
+        print(f"\nNOTES ({len(res.notes)}):")
+        for n in res.notes:
+            print(f"  - {n}")
 
     if res.warnings:
         print(f"\nWARNINGS ({len(res.warnings)}):")

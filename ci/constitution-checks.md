@@ -206,9 +206,21 @@ Missing governance coverage blocks implementation.
 
 ### 8. Policy externalization
 
-Thresholds, limits, roles, tiers, risk settings, entitlements, and event definitions must be externalized into YAML configuration.
+Thresholds, limits, roles, tiers, risk settings, entitlements, and event definitions must be externalized into YAML configuration. They must not be hardcoded in generated code.
 
-They must not be hardcoded in generated code.
+The **automated** source-scan below covers numeric policy thresholds from the `policies:` block specifically (values `>= 10`); the broader items in the list above — tiers, entitlements, event definitions — are enforced structurally elsewhere (seam tier-alignment in §6, the event model in §5), not by source-scanning, so this section's scan does not promise to catch them in code.
+
+Generated application code lives in:
+
+```txt
+apps/<app>/src/      # one source tree per app instance
+```
+
+Enforcement (`ci/constitution_validate.py`): for each app instance, if `apps/<app>/src/` exists, the validator scans its source files (`.py`, `.ts`, `.go`, `.java`, …) for literals equal to a numeric value declared under `policies:` in `DOMAIN_RULES.yaml` (e.g. `materiality_minor`, `auto_post_limit_minor`). A match means the value was hardcoded instead of read from config — ERROR.
+
+- Only distinctive numeric thresholds are scanned (values with `|value| >= 10`); ubiquitous literals like `0`, `1`, `3` and string values like a currency code are skipped to avoid false positives. Matching is boundary-precise, so `10000` does not match inside `10000000`.
+- **This check is dormant until generated code exists.** When an app instance has no `apps/<app>/src/` directory yet, the validator emits an informational **NOTE** (not a pass and not a failure) so its silence is never mistaken for a clean result. It activates automatically once the code tree appears.
+- Flat worked examples ship no generated code, so the check does not apply to them.
 
 ---
 
