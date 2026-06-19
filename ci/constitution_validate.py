@@ -356,9 +356,124 @@ def _rbac_path(pkg: Path) -> Path:
     return domain_dir(pkg) / "RBAC.yaml"
 
 
+def _authority_tiers(rules_blob) -> dict[str, str]:
+    """permission -> min_tier as declared in authority_map (when present)."""
+    tiers: dict[str, str] = {}
+    amap = rules_blob.get("authority_map") if isinstance(rules_blob, dict) else None
+    if isinstance(amap, dict):
+        for key, body in amap.items():
+            if isinstance(body, dict) and body.get("min_tier") is not None:
+                perm = str(body.get("permission", key))
+                tiers[perm] = str(body["min_tier"]).strip()
+    return tiers
+
+
+def _rbac_tiers(rbac) -> dict[str, str]:
+    """permission -> declared tier in RBAC.yaml (min_tier, or tier as a fallback)."""
+    tiers: dict[str, str] = {}
+    perms = rbac.get("permissions") if isinstance(rbac, dict) else None
+    if isinstance(perms, dict):
+        for perm, body in perms.items():
+            if isinstance(body, dict):
+                t = body.get("min_tier", body.get("tier"))
+                if t is not None:
+                    tiers[str(perm)] = str(t).strip()
+    return tiers
+
+
+def _domain_vocabulary(pkg: Path, res: Result) -> set[str]:
+    """Tokens that belong exclusively to the domain: entity names, invariant ids,
+    and state-machine state names. Derived from DOMAIN_MODEL.md, INVARIANTS.yaml,
+    and STATE_MACHINES.yaml so nothing is hardcoded -- onboarding referencing any
+    of these would be a domain dependency (constitution principle #5)."""
+    dom = domain_dir(pkg)
+    vocab: set[str] = set(_modeled_entities(dom).keys())
+    vocab |= set(normalize_invariants(load_yaml(dom / "INVARIANTS.yaml", res)).keys())
+    sm = load_yaml(dom / "STATE_MACHINES.yaml", res)
+    if isinstance(sm, dict):
+        for ent in (sm.get("entities") or {}).values():
+            if isinstance(ent, dict):
+                for st in ent.get("states") or []:
+                    vocab.add(str(st))
+    vocab.discard("")
+    return vocab
+
+
+def _iter_yaml_strings(obj):
+    """Yield every mapping key and scalar string in a parsed YAML structure.
+    Working from the parsed tree (not raw text) means comments -- which may
+    legitimately mention the domain in prose -- are not flagged; only actual data
+    references are."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(k, str):
+                yield k
+            yield from _iter_yaml_strings(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from _iter_yaml_strings(item)
+    elif isinstance(obj, str):
+        yield obj
+
+
+def _declared_event_trigger_names(blob) -> set[str]:
+    """The key names declared under an onboarding EVENTS.yaml's own `events:` and
+    `triggers:` maps. Onboarding owns its event/trigger vocabulary, and event names
+    (e.g. exception_resolved, period_closed) legitimately collide with
+    state-machine state names -- so these names are exempt from the domain-token
+    match in that file. Only the declaration KEYS are exempt; their values are
+    still scanned, so a domain entity smuggled into a payload is still caught."""
+    names: set[str] = set()
+    if not isinstance(blob, dict):
+        return names
+    for section in ("events", "triggers"):
+        sec = blob.get(section)
+        if isinstance(sec, dict):
+            names |= set(map(str, sec.keys()))
+        elif isinstance(sec, list):
+            for item in sec:
+                if isinstance(item, dict) and item.get("name"):
+                    names.add(str(item["name"]))
+                elif isinstance(item, str):
+                    names.add(item)
+    return names
+
+
+def _check_seam_direction(pkg: Path, res: Result) -> None:
+    """Constitution principle #5: the domain may read onboarding context, but
+    onboarding must never depend on the domain. Flag any onboarding/*.yaml whose
+    data references a domain entity, invariant id, or state name."""
+    onboarding = pkg / "onboarding"
+    if not onboarding.is_dir():
+        return
+    vocab = _domain_vocabulary(pkg, res)
+    if not vocab:
+        return
+    for path in sorted(onboarding.glob("*.yaml")):
+        blob = load_yaml(path, res)
+        # onboarding/EVENTS.yaml declares its own events/triggers; their names may
+        # legitimately collide with domain state names. Drop just those declared
+        # names from this file's vocabulary -- values are still fully scanned.
+        file_vocab = vocab
+        if path.name == "EVENTS.yaml":
+            file_vocab = vocab - _declared_event_trigger_names(blob)
+        if not file_vocab:
+            continue
+        patterns = {term: re.compile(rf"\b{re.escape(term)}\b") for term in file_vocab}
+        hits = {term for s in _iter_yaml_strings(blob)
+                for term, pat in patterns.items() if pat.search(s)}
+        for term in sorted(hits):
+            res.error(f"[SEAM] {pkg.name}: onboarding/{path.name} references domain "
+                      f"token '{term}' -- onboarding must not depend on the domain (principle #5)")
+
+
 def check_seam_consistency(pkg: Path, res: Result) -> None:
     rules_blob = load_yaml(domain_dir(pkg) / "DOMAIN_RULES.yaml", res)
     perms = _authority_permissions(rules_blob)
+
+    # Rule 2 (direction): independent of RBAC, so always check it.
+    _check_seam_direction(pkg, res)
+
     rbac_path = _rbac_path(pkg)
     if not rbac_path.exists():
         if perms:
@@ -369,6 +484,16 @@ def check_seam_consistency(pkg: Path, res: Result) -> None:
     declared = set((rbac or {}).get("permissions", {}).keys()) if isinstance(rbac, dict) else set()
     for p in sorted(perms - set(map(str, declared))):
         res.error(f"[SEAM] {pkg.name}: authority_map permission '{p}' is not declared in RBAC.yaml")
+
+    # Rule 1 (tier alignment): where both files give a tier for the same
+    # permission, they must agree -- otherwise the gate enforces a tier the domain
+    # never intended.
+    a_tiers = _authority_tiers(rules_blob)
+    r_tiers = _rbac_tiers(rbac)
+    for perm in sorted(set(a_tiers) & set(r_tiers)):
+        if a_tiers[perm] != r_tiers[perm]:
+            res.error(f"[SEAM] {pkg.name}: tier mismatch for permission '{perm}' "
+                      f"(authority_map min_tier={a_tiers[perm]} vs RBAC.yaml min_tier={r_tiers[perm]})")
 
 
 def check_invariant_observability(pkg: Path, res: Result) -> None:

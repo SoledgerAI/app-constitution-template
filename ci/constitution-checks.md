@@ -140,9 +140,11 @@ apps/<app>/onboarding/RBAC.yaml          # full app instances (the seam owns RBA
 examples/<example>/RBAC.yaml             # flat worked examples (beside the domain artifacts)
 ```
 
-Every permission named in the domain `authority_map` is verified against the `permissions:` keys in that RBAC file; an authority_map permission missing from RBAC is an ERROR. (A flat example has no `onboarding/` directory, so the validator resolves its RBAC beside the domain artifacts.)
+Three things are enforced (`ci/constitution_validate.py`):
 
-The domain may read onboarding context, but onboarding must not depend on domain entities, rules, or state machines.
+- **Permission coverage.** Every permission named in the domain `authority_map` must appear among the `permissions:` keys of the RBAC file. Missing = ERROR. (A flat example has no `onboarding/` directory, so the validator resolves its RBAC beside the domain artifacts.)
+- **Tier alignment.** Where an `authority_map` entry sets `min_tier` and RBAC declares a tier for the same permission, the two must agree. A mismatch means the gate would enforce a tier the domain never intended — ERROR.
+- **Direction (principle #5).** The domain may read onboarding context, but onboarding must never depend on the domain. Any `onboarding/*.yaml` whose data references a domain **entity name**, **invariant id** (`INV-*`), or **state-machine state name** is an ERROR. The domain vocabulary is derived from `DOMAIN_MODEL.md`, `INVARIANTS.yaml`, and `STATE_MACHINES.yaml` — nothing is hardcoded — and only parsed data is scanned, so comments mentioning the domain in prose are not flagged. **Exception:** in `onboarding/EVENTS.yaml`, the names declared under that file's own `events:` and `triggers:` maps are exempt from the match — onboarding owns its event vocabulary, and event names like `exception_resolved`/`period_closed` legitimately collide with domain state names. Only those declaration keys are exempt; their **values** (payload schemas, causes) are still scanned, so a domain entity referenced inside an event payload is still caught.
 
 ---
 
