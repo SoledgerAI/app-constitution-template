@@ -1,0 +1,4 @@
+# Normalize line endings. Commit LF in the repo regardless of the OS that wrote
+# the file; check out native locally. Stops the CRLF churn that otherwise shows up
+# every time these text files are touched on Windows.
+* text=auto eol=lf

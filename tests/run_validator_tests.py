@@ -84,6 +84,17 @@ def stage_app() -> tuple[Path, Path]:
     return tmp, dst
 
 
+def stage_templates() -> tuple[Path, Path]:
+    """Copy domain-templates/ into a fresh temp mini-repo. Used to prove the schema
+    check actually validates the _TEMPLATE.yaml twins, not just the real artifacts.
+    The mini-repo has no examples/ or apps/, so it holds nothing but the templates."""
+    tmp = Path(tempfile.mkdtemp(prefix="constgate-tpl-"))
+    _TMP_ROOTS.append(tmp)
+    dst = tmp / "domain-templates"
+    shutil.copytree(REPO / "domain-templates", dst)
+    return tmp, dst
+
+
 def cleanup() -> None:
     for t in _TMP_ROOTS:
         shutil.rmtree(t, ignore_errors=True)
@@ -98,6 +109,10 @@ def edit(path: Path, old: str, new: str) -> None:
 
 def append(path: Path, text: str) -> None:
     path.write_text(path.read_text(encoding="utf-8") + text, encoding="utf-8")
+
+
+def overwrite(path: Path, content: str) -> None:
+    path.write_text(content, encoding="utf-8")
 
 
 # convenience accessors for the golden app's files inside a staged copy
@@ -293,6 +308,96 @@ def t_events_name_collision_passes():
     return True, "stayed open on event-name/state collision"
 
 
+def t_schema_state_machines_missing_target():
+    """STATE_MACHINES schema is live. A transition loses its `to:` target. The
+    validator's own logic never reads `to`, so without JSON-Schema validation this
+    passes vacuously; the schema closes it."""
+    _root, app = stage_app()
+    edit(dom(app, "STATE_MACHINES.yaml"),
+         "from: submitted, to: approved, event: request_approved",
+         "from: submitted, event: request_approved")
+    open_, res = validate(_root)
+    return expect_closed(open_, res, "[SCHEMA]")
+
+
+def t_schema_invariants_as_list():
+    """INVARIANTS schema is live. `invariants` must be a MAP of id -> body; here it
+    is rewritten as a LIST (the DOMAIN_RULES shape) -- parseable YAML, wrong shape."""
+    _root, app = stage_app()
+    overwrite(dom(app, "INVARIANTS.yaml"),
+              "version: 1\n"
+              "invariants:\n"
+              "  - id: INV-1\n"
+              "    severity: critical\n"
+              "    statement: placeholder\n"
+              "    scope: AccessRequest\n"
+              "    enforced_at: request_decision\n"
+              "    on_violation: reject\n")
+    open_, res = validate(_root)
+    return expect_closed(open_, res, "[SCHEMA]")
+
+
+def t_schema_event_model_events_as_list():
+    """EVENT_MODEL schema is live. `events` must be a MAP of name -> body; here it
+    is rewritten as a LIST, which would otherwise yield an empty defined-event set."""
+    _root, app = stage_app()
+    overwrite(dom(app, "EVENT_MODEL.yaml"),
+              "version: 1\n"
+              "events:\n"
+              "  - name: access_granted\n"
+              "    producer: decision service\n"
+              "    schema: {}\n")
+    open_, res = validate(_root)
+    return expect_closed(open_, res, "[SCHEMA]")
+
+
+def t_schema_domain_rules_authority_map_misnested():
+    """DOMAIN_RULES schema is live. `authority_map` is rewritten as a LIST instead of
+    a map. WITHOUT the schema this is the vacuous-pass case: _authority_permissions()
+    reads an empty set, so the seam permission check verifies nothing and the gate
+    stays OPEN. The schema closes it."""
+    _root, app = stage_app()
+    edit(dom(app, "DOMAIN_RULES.yaml"),
+         "authority_map:\n"
+         "  access.request:\n"
+         "    permission: access.request\n"
+         "    min_tier: 1\n"
+         "    requires_approval: n\n"
+         "    notes: Submit a request to use a protected resource.\n"
+         "  access.approve:\n"
+         "    permission: access.approve\n"
+         "    min_tier: 3\n"
+         "    requires_approval: n\n"
+         "    notes: Approve or deny a pending request.\n"
+         "  access.revoke:\n"
+         "    permission: access.revoke\n"
+         "    min_tier: 3\n"
+         "    requires_approval: y\n"
+         "    notes: Revoke a live grant before its expiry; fully audited.",
+         "authority_map:\n"
+         "  - permission: access.request\n"
+         "    min_tier: 1\n"
+         "  - permission: access.approve\n"
+         "    min_tier: 3\n"
+         "  - permission: access.revoke\n"
+         "    min_tier: 3")
+    open_, res = validate(_root)
+    return expect_closed(open_, res, "[SCHEMA]")
+
+
+def t_schema_template_twin_is_validated():
+    """Pins that _schema_stem_for() matches the _TEMPLATE.yaml twins, not just the
+    real artifacts. Without that match, the 'same schema governs both' claim is
+    untested. Break a required field in INVARIANTS_TEMPLATE.yaml and the gate must
+    close on [SCHEMA] -- proving the template is genuinely validated, not skipped."""
+    _root, tpl = stage_templates()
+    edit(tpl / "INVARIANTS_TEMPLATE.yaml",
+         '    on_violation: "<reject | review | halt>"\n',
+         "")
+    open_, res = validate(_root)
+    return expect_closed(open_, res, "[SCHEMA]")
+
+
 def t_governance_exemption_tolerates_domain_tokens():
     """PIN (exemption works): DATA_GOVERNANCE.yaml may name domain internals freely.
     Inject several domain tokens (a state name, a decision verb, an invariant id)
@@ -366,6 +471,11 @@ TESTS = [
     ("observability critical alert:false",    t_observability_critical_alert_false),
     ("observability invariant missing",       t_observability_invariant_missing),
     ("hardcoded policy literal in src/",      t_hardcoded_policy_literal_in_src),
+    ("schema: STATE_MACHINES missing target", t_schema_state_machines_missing_target),
+    ("schema: INVARIANTS as list not map",    t_schema_invariants_as_list),
+    ("schema: EVENT_MODEL events as list",    t_schema_event_model_events_as_list),
+    ("schema: DOMAIN_RULES authority_map list", t_schema_domain_rules_authority_map_misnested),
+    ("schema: _TEMPLATE twin is validated",   t_schema_template_twin_is_validated),
     # clean / no-false-positive -- gate must stay OPEN
     ("EVENTS name/state collision PASSES",    t_events_name_collision_passes),
     ("DATA_GOVERNANCE exemption tolerates token", t_governance_exemption_tolerates_domain_tokens),

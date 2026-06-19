@@ -36,6 +36,11 @@ repo/
 ├── agent/                           # agent operating rules
 │   └── BUILD_HANDOFF.md             # how an agent uses this repo
 ├── ci/                              # validation + quality gates (see below)
+│   ├── constitution_validate.py     # the executable gate
+│   └── schemas/                     # JSON Schemas for the 4 core domain artifacts
+│
+├── tests/                           # regression guard for the validator itself
+│   └── run_validator_tests.py       # one fixture per failure mode
 │
 ├── examples/                        # ── worked, filled-in references (NOT production) ──
 │   └── reconciliation-ledger/
@@ -117,6 +122,7 @@ Full contract: `constitution/onboarding/SEAM_CONTRACT.md`.
 ## CI / validation gates (`ci/`)
 
 - **yaml-valid** — every YAML parses.
+- **schema-conformant** — the 4 core domain artifacts match their `ci/schemas/` JSON Schema (right shape, not just parseable).
 - **pii-registered** — every PII field has a `DATA_GOVERNANCE` entry.
 - **events-defined** — every event emitted in state machines exists in an event file.
 - **invariant-observable** — every `INVARIANTS.yaml` entry has a metric in `OBSERVABILITY.md`.

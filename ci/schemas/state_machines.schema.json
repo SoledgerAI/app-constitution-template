@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "constitution/state_machines.schema.json",
+  "title": "STATE_MACHINES.yaml",
+  "description": "One block per stateful entity under `entities`. Each transition MUST carry from/to/event; the validator never reads `to`, so without this schema a transition missing its target passes silently.",
+  "type": "object",
+  "required": ["entities"],
+  "properties": {
+    "entities": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "required": ["states", "initial", "transitions"],
+        "properties": {
+          "description": { "type": "string" },
+          "states": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+          "initial": { "type": "string" },
+          "terminal": { "type": "array", "items": { "type": "string" } },
+          "transitions": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["from", "to", "event"],
+              "properties": {
+                "from": { "type": "string" },
+                "to": { "type": "string" },
+                "event": { "type": "string" },
+                "guard": { "type": "string" },
+                "effect": { "type": "string" },
+                "emits": { "type": ["string", "null"] },
+                "authority": { "type": "string" }
+              }
+            }
+          },
+          "forbidden_transitions": { "type": "array" },
+          "idempotent_events": { "type": "array" }
+        }
+      }
+    }
+  }
+}

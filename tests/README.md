@@ -17,7 +17,12 @@ what the gate must catch:
   `DOMAIN_MODEL.md`), seam permission missing from RBAC, seam tier mismatch,
   onboarding→domain direction violation, a domain entity smuggled into an event
   payload, an observability `critical` invariant set `alert: false`, an invariant
-  missing from the observability block, and a hardcoded policy literal in `src/`.
+  missing from the observability block, a hardcoded policy literal in `src/`, and a
+  schema-invalid artifact (a transition stripped of its `to:` target — the kind of
+  wrong-shape YAML that parses fine but the validator's own logic never reads).
+- **Exemption pins** for the `DATA_GOVERNANCE.yaml` direction-scan carve-out: one
+  proving it tolerates domain tokens in that file, one proving the *same* token in
+  another onboarding file still fails (the exemption is scoped to the filename).
 - **No-false-positive fixtures**, asserting the gate stays **OPEN**: an onboarding
   event whose name legitimately collides with a domain state name, and the dormant
   policy-externalization NOTE when an app has no `src/` yet.

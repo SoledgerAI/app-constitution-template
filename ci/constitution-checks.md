@@ -24,6 +24,25 @@ apps/*/domain/*.yaml
 
 Failure means the package cannot proceed.
 
+**Structural conformance.** Parsing is necessary but not sufficient. The four core
+domain artifacts are additionally validated against a JSON Schema in `ci/schemas/`:
+
+```txt
+INVARIANTS.yaml      ci/schemas/invariants.schema.json
+DOMAIN_RULES.yaml    ci/schemas/domain_rules.schema.json
+STATE_MACHINES.yaml  ci/schemas/state_machines.schema.json
+EVENT_MODEL.yaml     ci/schemas/event_model.schema.json
+```
+
+The schemas check **shape, not value semantics**, so template placeholders like
+`<INV-1>` and a string `min_tier: "<0-4>"` still conform — each schema governs both
+the real artifact and its `_TEMPLATE.yaml` twin. They exist to make *malformed-but-
+parseable* YAML fail loudly instead of passing vacuously: `invariants` as a list
+where a map is required (or vice-versa), a transition missing its `to:` target
+(which the validator's own logic never reads), or a mis-nested `authority_map` /
+`data_fields` block that would otherwise resolve to an empty set and sail through
+the seam or governance check. A schema violation is an ERROR (`[SCHEMA]`).
+
 ---
 
 ### 2. Template purity

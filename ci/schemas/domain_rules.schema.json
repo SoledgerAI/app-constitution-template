@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "constitution/domain_rules.schema.json",
+  "title": "DOMAIN_RULES.yaml",
+  "description": "The enforcement view. `invariants` MUST be a LIST of {id, ...} (NOT a map -- that shape belongs to INVARIANTS.yaml). `authority_map` and `data_fields` are constrained because their mis-nesting otherwise yields empty sets that pass the seam/governance checks vacuously.",
+  "type": "object",
+  "required": ["invariants"],
+  "properties": {
+    "invariants": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "statement", "scope", "enforced_at", "on_violation"],
+        "properties": {
+          "id": { "type": "string" },
+          "statement": { "type": "string" },
+          "scope": { "type": "string" },
+          "enforced_at": { "type": "string" },
+          "on_violation": { "type": "string" },
+          "test": { "type": "string" }
+        }
+      }
+    },
+    "policies": { "type": "object" },
+    "authority_map": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["permission", "min_tier"],
+        "properties": {
+          "permission": { "type": "string" },
+          "min_tier": { "type": ["string", "integer"] },
+          "requires_approval": { "type": ["string", "boolean"] },
+          "notes": { "type": "string" }
+        }
+      }
+    },
+    "derived": { "type": "object" },
+    "data_fields": {
+      "type": "object",
+      "properties": {
+        "sensitive_fields": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["field", "classification"],
+            "properties": {
+              "field": { "type": "string" },
+              "classification": { "type": "string" }
+            }
+          }
+        },
+        "tenant_scoped_entities": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}

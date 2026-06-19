@@ -39,6 +39,13 @@ except ImportError:
     print("ERROR: PyYAML is required. Run:  pip install pyyaml", file=sys.stderr)
     sys.exit(2)
 
+try:
+    import json
+    import jsonschema
+except ImportError:
+    print("ERROR: jsonschema is required. Run:  pip install jsonschema", file=sys.stderr)
+    sys.exit(2)
+
 
 # --------------------------------------------------------------------------- #
 # Result plumbing
@@ -146,6 +153,71 @@ def check_yaml_validity(root: Path, res: Result) -> None:
         if ".git" in path.parts:
             continue
         load_yaml(path, res)
+
+
+# Each of these artifacts has a JSON Schema in ci/schemas/. A file that parses as
+# YAML but has the wrong SHAPE (a list where a map is expected, a transition with
+# no target, an authority_map that mis-nests) currently slips through: the
+# downstream checks read an empty set and pass vacuously. Schema validation makes
+# that fail loudly instead. The same schema covers the real artifact and its
+# _TEMPLATE.yaml twin, since templates must stay structurally valid too.
+SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
+SCHEMA_BY_STEM = {
+    "INVARIANTS": "invariants.schema.json",
+    "DOMAIN_RULES": "domain_rules.schema.json",
+    "STATE_MACHINES": "state_machines.schema.json",
+    "EVENT_MODEL": "event_model.schema.json",
+}
+_SCHEMA_CACHE: dict[str, dict] = {}
+
+
+def _schema_stem_for(path: Path) -> str | None:
+    """Return the schema key for a file, matching both `INVARIANTS.yaml` and
+    `INVARIANTS_TEMPLATE.yaml`. None if the file is not a schema-governed artifact."""
+    name = path.name
+    for stem in SCHEMA_BY_STEM:
+        if name == f"{stem}.yaml" or name == f"{stem}_TEMPLATE.yaml":
+            return stem
+    return None
+
+
+def _load_schema(stem: str, res: Result) -> dict | None:
+    if stem in _SCHEMA_CACHE:
+        return _SCHEMA_CACHE[stem]
+    spath = SCHEMA_DIR / SCHEMA_BY_STEM[stem]
+    try:
+        schema = json.loads(spath.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        res.error(f"[SCHEMA] cannot load schema {spath.name}: {exc}")
+        return None
+    _SCHEMA_CACHE[stem] = schema
+    return schema
+
+
+def check_schema_conformance(root: Path, res: Result) -> None:
+    """Validate every schema-governed YAML artifact (in examples/, apps/, and
+    domain-templates/) against its JSON Schema. Reports the first structural error
+    per file with a JSON-pointer-ish location so the fix is obvious."""
+    for path in sorted(root.rglob("*.yaml")):
+        if ".git" in path.parts:
+            continue
+        stem = _schema_stem_for(path)
+        if stem is None:
+            continue
+        try:
+            blob = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (yaml.YAMLError, OSError, UnicodeDecodeError):
+            continue  # parse/read failures are already reported by check_yaml_validity
+        schema = _load_schema(stem, res)
+        if schema is None:
+            continue
+        validator = jsonschema.Draft202012Validator(schema)
+        errors = sorted(validator.iter_errors(blob), key=lambda e: list(e.absolute_path))
+        if errors:
+            exc = errors[0]
+            loc = "/".join(str(p) for p in exc.absolute_path) or "(root)"
+            rel = path.relative_to(root).as_posix()
+            res.error(f"[SCHEMA] {rel}: {exc.message} (at {loc})")
 
 
 def check_template_purity(root: Path, res: Result) -> None:
@@ -812,6 +884,7 @@ def run(root: Path, only_package: str | None) -> Result:
 
     # Repo-wide gates
     check_yaml_validity(root, res)
+    check_schema_conformance(root, res)
     check_template_purity(root, res)
 
     packages = discover_packages(root)
