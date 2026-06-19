@@ -449,7 +449,17 @@ def _declared_event_trigger_names(blob) -> set[str]:
 def _check_seam_direction(pkg: Path, res: Result) -> None:
     """Constitution principle #5: the domain may read onboarding context, but
     onboarding must never depend on the domain. Flag any onboarding/*.yaml whose
-    data references a domain entity, invariant id, or state name."""
+    data references a domain entity, invariant id, or state name.
+
+    DATA_GOVERNANCE.yaml is exempt as a whole. It is the seam's data-policy
+    mapping ONTO domain data: the governance check (check_data_governance) requires
+    it to key every entry by the governed `Entity.attribute` / `Entity` and to
+    justify each in prose that necessarily names the domain. Naming the data it
+    governs is its purpose, not a runtime dependency of onboarding logic on the
+    domain -- so its references are not a direction violation. (This is why a flat
+    worked example, whose governance file sits beside the domain rather than under
+    onboarding/, never tripped this: the conflict only exists for a real app
+    instance, where the seam owns governance.)"""
     onboarding = pkg / "onboarding"
     if not onboarding.is_dir():
         return
@@ -457,6 +467,8 @@ def _check_seam_direction(pkg: Path, res: Result) -> None:
     if not vocab:
         return
     for path in sorted(onboarding.glob("*.yaml")):
+        if path.name == "DATA_GOVERNANCE.yaml":
+            continue
         blob = load_yaml(path, res)
         # onboarding/EVENTS.yaml declares its own events/triggers; their names may
         # legitimately collide with domain state names. Drop just those declared

@@ -31,3 +31,10 @@ jobs:
       - name: Run constitution validator
         run: python3 ci/constitution_validate.py
         # To make warnings (e.g. unmodeled events) also block, add: --strict
+
+      - name: Run validator fixture regression suite
+        # The validator only proves the *current* packages pass. This suite proves
+        # the validator itself still CATCHES every failure mode (and doesn't
+        # false-positive on the clean ones). If a hardened check is ever loosened,
+        # the matching fixture turns red here.
+        run: python3 tests/run_validator_tests.py

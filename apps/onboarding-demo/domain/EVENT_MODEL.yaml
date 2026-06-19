@@ -1,0 +1,55 @@
+# EVENT_MODEL.yaml — access-grants (app instance: onboarding-demo)
+# Two namespaces: events: are the facts published; triggers: are the causes that
+# drive STATE_MACHINES.yaml transitions. A trigger's emits may be null; a trigger
+# is NOT required to have a matching events: entry. The constitution gate checks
+# both: every emitted event must be defined here, every transition trigger declared.
+version: 1
+
+conventions:
+  naming: "past_tense — access_<verb>"
+  envelope: { event_id: uuid, occurred_at: timestamp, org_id: string, actor_id: string, version: int }
+  pii: "ids and hashes only"
+  ordering: "append-only; consumers tolerate at-least-once delivery"
+
+events:
+
+  access_granted:
+    producer: "decision service (access_request: submitted->approved)"
+    consumer: [grant_minter, observability]
+    schema: { request_id: string, grant_id: string, granted_at: timestamp, expires_at: timestamp }
+    idempotency: "request_id"
+    retention: forever
+    drives_invariant: INV-1, INV-2
+
+  access_denied:
+    producer: "decision service (access_request: submitted->denied)"
+    consumer: [notifier, observability]
+    schema: { request_id: string, reason: string }
+    idempotency: "request_id"
+    retention: forever
+    drives_invariant: INV-1
+
+  access_expired:
+    producer: "expiry sweep (grant: active->expired)"
+    consumer: [enforcement, observability]
+    schema: { grant_id: string, expired_at: timestamp }
+    idempotency: "grant_id"
+    retention: forever
+    drives_invariant: INV-2
+
+  access_revoked:
+    producer: "revoke service (grant: active->revoked)"
+    consumer: [enforcement, audit, observability]
+    schema: { grant_id: string, revoked_by: string, reason: string }
+    idempotency: "grant_id"
+    retention: forever
+    drives_invariant: INV-3
+
+# Triggers — the causes that drive transitions. A trigger names *why* a transition
+# fires; emits is the event it produces (null is valid). Every transition `event:`
+# in STATE_MACHINES.yaml must appear here.
+triggers:
+  request_approved: { emits: access_granted }
+  request_denied:   { emits: access_denied }
+  grant_expired:    { emits: access_expired }
+  access_revoked:   { emits: access_revoked }

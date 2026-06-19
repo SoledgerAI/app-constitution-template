@@ -1,0 +1,36 @@
+# DATA_GOVERNANCE.yaml — onboarding instance for the access-grants app.
+# Governance coverage for every field/entity declared in domain/DOMAIN_RULES.yaml
+# `data_fields:`. The constitution gate fails the build if a declared-sensitive
+# field has no complete entry here, or if a tenant-scoped (org_id-bearing) entity
+# has no tenancy note.
+#
+# This is the seam's data-policy mapping ONTO domain data: naming the governed
+# entities and fields is its whole purpose, not a runtime dependency on the domain.
+# The seam direction check (principle #5) therefore exempts this file, the same way
+# it exempts onboarding/EVENTS.yaml's own declared event names.
+version: 1
+
+# Per-field governance for personal/sensitive/regulated data. Each entry must
+# answer classification + purpose + retention at minimum.
+fields:
+  AccessRequest.requested_by:
+    classification: personal
+    purpose: "Audit trail for who asked for access; accountability for the request."
+    retention: "Retained for the life of the request record + 2 years, then purged."
+    access: "Reviewers and auditors only; never bulk-exported."
+
+  Grant.approved_by:
+    classification: personal
+    purpose: "Audit trail for who authorized a grant; segregation-of-duties evidence."
+    retention: "Retained for the life of the grant record + 2 years, then purged."
+    access: "Reviewers, security admins, and auditors only."
+
+# Per-entity tenancy notes. Every entity carries org_id (INV-3 scope:all); each is
+# isolated at the row level and may never be referenced across orgs.
+entities:
+  AccessRequest:
+    tenant_scope: org_id
+    note: "Row-level org isolation; every query is org-scoped (INV-3). Decision is immutable once made."
+  Grant:
+    tenant_scope: org_id
+    note: "Row-level org isolation; a grant only ever authorizes resources in its own org."

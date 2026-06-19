@@ -1,0 +1,45 @@
+# RISK_POLICIES.yaml — onboarding instance for the access-grants app.
+# Runtime source of truth for the risk engine. risk.evaluate() reads this file.
+# Do NOT hardcode any of these values in application code. This file is pure
+# onboarding policy and references nothing in the domain (seam principle #5).
+version: 1
+
+tiers:
+  0: { name: anonymous,      aal: 0, cleared_by: "bot/human signal" }
+  1: { name: reachable,      aal: 2, cleared_by: "email + passkey" }
+  2: { name: billable,       aal: 2, cleared_by: "profile + tokenized payment method" }
+  3: { name: verified,       aal: 2, cleared_by: "doc + liveness, sanctions clear" }
+  4: { name: high_assurance, aal: 3, cleared_by: "device-bound authenticator + step-up" }
+
+# action.name -> minimum tier required to perform it
+action_required_tier:
+  view_resource: 0
+  submit_request: 1
+  decide_request: 3
+  revoke_authorization: 3
+
+# Signal thresholds. Illustrative defaults — tune per app, but keep them HERE.
+signal_thresholds:
+  bot_score_min: 0.5            # below => likely bot => deny at T0
+  email_risk_max: 0.7          # above => disposable/high-risk => prompt work email
+  velocity_stepup: 0.7         # above => step_up re-auth
+
+# Hard blocks evaluated FIRST, before tier comparison.
+hard_blocks:
+  - if: "sanctions_status == 'hit'"
+    decision: deny
+    reason: sanctions_hit
+  - if: "context.bot_score < signal_thresholds.bot_score_min"
+    decision: deny
+    reason: bot_suspected
+
+resolution:
+  order: [hard_blocks, tier_gap, velocity_stepup, allow]
+  default: allow
+
+decisions: [allow, step_up, review, deny]
+
+audit:
+  write_on: [allow, step_up, review, deny]
+  emit_event:
+    step_up: step_up_challenged

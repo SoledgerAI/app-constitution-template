@@ -1,0 +1,49 @@
+# EVENTS.yaml — onboarding instance for the access-grants app.
+# Canonical onboarding event contract. These are platform/onboarding facts, owned
+# by the seam and emitted independently of the domain — onboarding does not know
+# the domain exists (seam principle #5). Never place secrets or raw PII in
+# properties — ids and hashes only.
+version: 1
+
+events:
+
+  - name: signup_initiated
+    when: User begins account creation
+    properties:
+      method: enum[passkey, sso, otp]
+    feeds: [visitor_to_signup]
+
+  - name: email_verified
+    when: Email ownership confirmed
+    properties:
+      user_id: string
+    feeds: [account_quality]
+
+  - name: tier_changed
+    when: A user's tier increases or decreases
+    properties:
+      user_id: string
+      from_tier: number
+      to_tier: number
+      trigger: string
+    feeds: [ladder_progression]
+
+  - name: step_up_challenged
+    when: risk.evaluate returns STEP_UP
+    properties:
+      user_id: string
+      action: string
+      required_tier: number
+    feeds: [friction_at_gates]
+
+  - name: step_up_passed
+    when: User clears a step-up challenge
+    properties:
+      user_id: string
+      action: string
+      to_tier: number
+    feeds: [friction_at_gates]
+
+metrics:
+  signup_to_verified: { cadence: weekly, formula: "email_verified / signup_initiated" }
+  friction_at_gates:  { target: "< 10%", formula: "step_up_challenged / gated_actions" }
