@@ -496,6 +496,24 @@ def check_seam_consistency(pkg: Path, res: Result) -> None:
                       f"(authority_map min_tier={a_tiers[perm]} vs RBAC.yaml min_tier={r_tiers[perm]})")
 
 
+_FENCE_RE = re.compile(r"```[^\n]*\n(.*?)\n```", re.DOTALL)
+
+
+def _parse_observability_block(text: str) -> dict[str, dict]:
+    """OBSERVABILITY.md must carry a fenced code block whose YAML has a top-level
+    `observability:` map of invariant_id -> {metric, alert, threshold}. Substring
+    matching can't tell 'INV-3 is alerted' from 'INV-3 is NOT observable'; a parsed
+    structure can. Returns the map, or {} if no such block exists."""
+    for body in _FENCE_RE.findall(text):
+        try:
+            blob = yaml.safe_load(body)
+        except yaml.YAMLError:
+            continue
+        if isinstance(blob, dict) and isinstance(blob.get("observability"), dict):
+            return {str(k): v for k, v in blob["observability"].items()}
+    return {}
+
+
 def check_invariant_observability(pkg: Path, res: Result) -> None:
     dom = domain_dir(pkg)
     inv = normalize_invariants(load_yaml(dom / "INVARIANTS.yaml", res))
@@ -503,17 +521,35 @@ def check_invariant_observability(pkg: Path, res: Result) -> None:
     if not obs_path.exists():
         res.error(f"[OBSERVE] {pkg.name}: OBSERVABILITY.md missing")
         return
-    obs_text = obs_path.read_text(encoding="utf-8")
+    obs_map = _parse_observability_block(obs_path.read_text(encoding="utf-8"))
+    if not obs_map:
+        res.error(f"[OBSERVE] {pkg.name}: OBSERVABILITY.md has no machine-readable "
+                  f"`observability:` block (fenced YAML mapping invariant_id -> "
+                  f"{{metric, alert, threshold}})")
+        return
+
     for inv_id, body in inv.items():
-        metric = str(body.get("observable_as", "")).strip()
-        seen = (inv_id in obs_text) or (metric and metric in obs_text)
-        if not seen:
-            res.error(f"[OBSERVE] {pkg.name}: {inv_id} has no metric/entry in OBSERVABILITY.md")
+        entry = obs_map.get(inv_id)
+        if not isinstance(entry, dict):
+            res.error(f"[OBSERVE] {pkg.name}: {inv_id} has no entry in the "
+                      f"OBSERVABILITY.md observability: block")
             continue
-        if str(body.get("severity", "")).lower() == "critical":
-            # Critical invariants must have alerting somewhere near their mention.
-            if "critical" not in obs_text.lower():
-                res.warn(f"[OBSERVE] {pkg.name}: {inv_id} is critical but no 'Critical' alert found")
+        # A malformed entry defeats the purpose of a parsed block.
+        bad = []
+        if not str(entry.get("metric", "")).strip():
+            bad.append("metric")
+        if not str(entry.get("threshold", "")).strip():
+            bad.append("threshold")
+        if not isinstance(entry.get("alert"), bool):
+            bad.append("alert(must be true/false)")
+        if bad:
+            res.error(f"[OBSERVE] {pkg.name}: {inv_id} observability entry is "
+                      f"missing/invalid: {', '.join(bad)}")
+            continue
+        # Critical invariants must actually alert -- not merely be mentioned.
+        if str(body.get("severity", "")).lower() == "critical" and entry["alert"] is not True:
+            res.error(f"[OBSERVE] {pkg.name}: {inv_id} is severity:critical but its "
+                      f"observability entry has alert: {entry['alert']} (must be true)")
 
 
 # A field/entity is "governed" when the package declares it carries data in one of

@@ -86,19 +86,29 @@ If any file is missing, stop.
 
 ### 4. Invariant observability
 
-Every invariant in:
+`OBSERVABILITY.md` must carry a **machine-readable** `observability:` block — a fenced YAML code block mapping every invariant id to its production signal. The gate parses this block; it does **not** substring-match prose (a sentence saying "INV-3 is *not* observable" must never satisfy the check).
 
-```txt
-apps/<app>/domain/INVARIANTS.yaml
+```yaml
+observability:
+  INV-1: { metric: unassigned_entries, alert: true,  threshold: "> 0 after run complete" }
+  INV-5: { metric: duplicate_ingest_rate, alert: false, threshold: "> 1% of ingests" }
+  # ... one entry per invariant ...
 ```
 
-must have at least one corresponding metric, log, audit event, or alert in:
+Each entry requires:
 
-```txt
-apps/<app>/domain/OBSERVABILITY.md
-```
+- `metric` — the production signal that measures the invariant (required, non-empty).
+- `alert` — boolean `true`/`false`: does a breach page someone, or is it dashboard/trend only.
+- `threshold` — the value that means the invariant is at risk or broken (required; quote it so YAML doesn't choke on `>`/`%`).
 
-Critical invariants must have alerting.
+Enforcement (`ci/constitution_validate.py`), all ERRORs:
+
+- An invariant in `INVARIANTS.yaml` (location: `apps/<app>/domain/INVARIANTS.yaml`) with no entry in the `observability:` block.
+- An entry missing `metric`/`threshold`, or whose `alert` is not a boolean.
+- A `severity: critical` invariant whose entry is not `alert: true` — **critical invariants must alert.**
+- No `observability:` block present at all.
+
+The location is `apps/<app>/domain/OBSERVABILITY.md` (or `examples/<example>/OBSERVABILITY.md` for flat worked examples).
 
 ---
 

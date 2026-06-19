@@ -4,6 +4,27 @@
 > metric below should read **zero**. A non-zero reading is either a real
 > violation or a broken enforcement point — both are incidents.
 
+## Machine-readable coverage (authoritative)
+
+The constitution gate parses the block below: one entry per invariant in
+`INVARIANTS.yaml`, each declaring its `metric`, whether it `alert`s, and the
+`threshold` that trips it. Every `critical` invariant must have `alert: true`.
+The prose table and per-invariant detail that follow are the human-readable view
+of the same facts.
+
+```yaml
+observability:
+  INV-1: { metric: unassigned_entries,              alert: true,  threshold: "> 0 after run complete" }
+  INV-2: { metric: out_of_tolerance_matches,        alert: true,  threshold: "> 0" }
+  INV-3: { metric: unbalanced_adjustment_attempts,  alert: true,  threshold: "> 0 posted unbalanced" }
+  INV-4: { metric: immutability_violation_attempts, alert: true,  threshold: "> 0" }
+  INV-5: { metric: duplicate_ingest_rate,           alert: false, threshold: "> 1% of ingests" }
+  INV-6: { metric: material_open_exceptions_at_close, alert: true, threshold: "> 0 at close attempt" }
+  INV-7: { metric: frozen_write_attempts,           alert: true,  threshold: "> 0" }
+  INV-8: { metric: cross_tenant_access_attempts,    alert: true,  threshold: "> 0" }
+  INV-9: { metric: out_of_period_entries,           alert: false, threshold: "> 0" }
+```
+
 ## Summary table
 
 | Invariant | Metric | Threshold | Alert | Dashboard | Escalation |
