@@ -25,7 +25,7 @@ Usage
 -----
     python tests/run_validator_tests.py          # run the suite (exit 1 on any failure)
 
-Dependencies: PyYAML (same as the validator).
+Dependencies: PyYAML, jsonschema (same as the validator).
 """
 
 from __future__ import annotations
@@ -193,7 +193,13 @@ def t_ungoverned_pii_field():
          "    - field: Grant.approved_by\n      classification: personal      # user identifier of the approver\n"
          "    - field: AccessRequest.reason\n      classification: personal")
     open_, res = validate(_root)
-    return expect_closed(open_, res, "AccessRequest.reason")
+    if open_:
+        return False, "gate stayed OPEN but should have CLOSED"
+    # Bind to the governance check: the SAME error line must carry both the [GOVERN]
+    # tag and the field name, so an unrelated error mentioning the field can't satisfy it.
+    if not any("[GOVERN]" in e and "AccessRequest.reason" in e for e in res.errors):
+        return False, f"no [GOVERN] error named AccessRequest.reason; errors={res.errors}"
+    return True, "closed on [GOVERN] for AccessRequest.reason"
 
 
 def t_ungoverned_tenant_entity_from_domain_model():
@@ -259,7 +265,13 @@ def t_observability_critical_alert_false():
          'alert: true,  threshold: "> 0 (a decided request changed)"',
          'alert: false, threshold: "> 0 (a decided request changed)"')
     open_, res = validate(_root)
-    return expect_closed(open_, res, "[OBSERVE]")
+    if open_:
+        return False, "gate stayed OPEN but should have CLOSED"
+    # Bind to the specific critical-must-alert message, not the bare [OBSERVE] tag, so a
+    # missing/unparseable block (which also emits [OBSERVE]) can't satisfy this fixture.
+    if not any("INV-1" in e and "alert: False" in e and "must be true" in e for e in res.errors):
+        return False, f"no critical-alert [OBSERVE] error for INV-1; errors={res.errors}"
+    return True, "closed on INV-1 critical alert:false (must be true)"
 
 
 def t_observability_invariant_missing():
