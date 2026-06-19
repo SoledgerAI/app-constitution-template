@@ -1,0 +1,3 @@
+# Python bytecode (the validator/runner are plain scripts; no compiled artifacts)
+__pycache__/
+*.py[cod]

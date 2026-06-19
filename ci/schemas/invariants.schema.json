@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "constitution/invariants.schema.json",
+  "title": "INVARIANTS.yaml",
+  "description": "The invariant registry. `invariants` MUST be a map of id -> body (NOT a list -- that shape belongs to DOMAIN_RULES.yaml). Validates structure, not value semantics, so template placeholders like <INV-1> conform.",
+  "type": "object",
+  "required": ["invariants"],
+  "properties": {
+    "invariants": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "required": ["severity", "statement", "scope", "enforced_at", "on_violation"],
+        "properties": {
+          "severity": { "type": "string" },
+          "statement": { "type": "string" },
+          "scope": { "type": "string" },
+          "enforced_at": { "type": "string" },
+          "on_violation": { "type": "string" },
+          "observable_as": { "type": "string" }
+        }
+      }
+    }
+  }
+}

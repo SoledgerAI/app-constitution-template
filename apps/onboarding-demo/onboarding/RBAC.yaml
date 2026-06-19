@@ -1,0 +1,29 @@
+# RBAC.yaml — onboarding instance for the access-grants app.
+# The three domain permissions registered by the domain authority_map
+# (domain/DOMAIN_RULES.yaml). The central server-side checker enforces them;
+# min_tier mirrors authority_map exactly — if they drift, the seam check fails
+# the build.
+version: 1
+
+roles:
+  requester:
+    description: Submits access requests for protected resources.
+    inherits: []
+  reviewer:
+    description: Decides pending requests (approve or deny).
+    inherits: [requester]
+  security_admin:
+    description: Revokes live grants; highest-assurance role.
+    inherits: [reviewer]
+
+# permission -> { roles allowed, minimum tier } — keyed exactly as authority_map.
+permissions:
+  access.request: { roles: [requester, reviewer, security_admin], min_tier: 1 }
+  access.approve: { roles: [reviewer, security_admin],            min_tier: 3 }
+  access.revoke:  { roles: [security_admin],                      min_tier: 3 }
+
+rules:
+  - access.revoke is high-assurance and additionally requires step-up re-auth at
+    call time (enforced by risk.evaluate, see RISK_POLICIES.yaml).
+  - A role grant never raises a user's tier; the user must independently clear the
+    tier the permission requires.

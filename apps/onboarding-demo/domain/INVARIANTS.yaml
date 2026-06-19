@@ -1,0 +1,36 @@
+# INVARIANTS.yaml — access-grants (app instance: onboarding-demo)
+# The single registry of invariant truth. DOMAIN_RULES.yaml mirrors enforced_at,
+# scope, and on_violation for every invariant; the constitution gate fails the
+# build if they drift.
+version: 1
+
+severity_levels:
+  critical: "Correctness or security integrity. Stop-the-line."
+  high:     "Serious but recoverable. Review / queue."
+  medium:   "Quality signal. Log / trend."
+
+invariants:
+
+  INV-1:
+    severity: critical
+    statement: "An AccessRequest resolves to exactly one terminal outcome — approved or denied — never both, and the decision is immutable."
+    scope: AccessRequest
+    enforced_at: request_decision
+    observable_as: double_decided_requests
+    on_violation: reject
+
+  INV-2:
+    severity: high
+    statement: "A Grant's expires_at is strictly after granted_at and within max_grant_ttl_hours; lifetime is positive and bounded."
+    scope: Grant
+    enforced_at: grant_create
+    observable_as: invalid_grant_lifetimes
+    on_violation: reject
+
+  INV-3:
+    severity: critical
+    statement: "Every entity carries org_id; no cross-tenant reference exists."
+    scope: all
+    enforced_at: repository
+    observable_as: cross_tenant_access_attempts
+    on_violation: halt

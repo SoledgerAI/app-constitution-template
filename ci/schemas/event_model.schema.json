@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "constitution/event_model.schema.json",
+  "title": "EVENT_MODEL.yaml",
+  "description": "`events` MUST be a map of event_name -> body (NOT a list); a list yields an empty defined-event set. `triggers` is the separate cause namespace and may be a map or a list.",
+  "type": "object",
+  "required": ["events"],
+  "properties": {
+    "events": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "required": ["producer", "schema"],
+        "properties": {
+          "producer": { "type": "string" },
+          "consumer": { "type": "array" },
+          "schema": { "type": "object" },
+          "idempotency": { "type": "string" },
+          "retention": { "type": "string" },
+          "drives_invariant": { "type": "string" }
+        }
+      }
+    },
+    "triggers": { "type": ["object", "array"] },
+    "conventions": { "type": "object" }
+  }
+}

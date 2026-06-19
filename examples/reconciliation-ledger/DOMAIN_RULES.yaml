@@ -114,3 +114,25 @@ derived:
   match_residual_minor: "sum(entry.amount_minor for entry in match.entry_ids)"
   period_balanced: "count(open material exceptions) == 0"
   adjustment_balanced: "sum(line.debit_minor) - sum(line.credit_minor) == 0"
+
+# Data governance declaration. Anything listed here is protected data and MUST
+# carry a matching entry in DATA_GOVERNANCE.yaml — the constitution gate
+# (ci/constitution-checks.md #7) fails the build otherwise. Declare once here;
+# govern once there.
+data_fields:
+  # Personal / sensitive / regulated fields, by Entity.attribute.
+  sensitive_fields:
+    - field: Adjustment.approved_by
+      classification: personal      # user identifier of the approver
+    - field: Period.closed_by
+      classification: personal      # user identifier who closed the period
+  # Entities that carry org_id (INV-8: every entity is tenant-scoped). Each needs
+  # a tenancy note in DATA_GOVERNANCE.yaml.
+  tenant_scoped_entities:
+    - Source
+    - LedgerEntry
+    - ReconciliationRun
+    - MatchSet
+    - Exception
+    - Adjustment
+    - Period

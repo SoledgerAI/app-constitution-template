@@ -39,6 +39,13 @@ except ImportError:
     print("ERROR: PyYAML is required. Run:  pip install pyyaml", file=sys.stderr)
     sys.exit(2)
 
+try:
+    import json
+    import jsonschema
+except ImportError:
+    print("ERROR: jsonschema is required. Run:  pip install jsonschema", file=sys.stderr)
+    sys.exit(2)
+
 
 # --------------------------------------------------------------------------- #
 # Result plumbing
@@ -48,6 +55,7 @@ except ImportError:
 class Result:
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
 
     def error(self, msg: str) -> None:
         self.errors.append(msg)
@@ -55,9 +63,15 @@ class Result:
     def warn(self, msg: str) -> None:
         self.warnings.append(msg)
 
+    def note(self, msg: str) -> None:
+        """Informational only -- never affects the gate, even under --strict. Used
+        to make a dormant/inactive check visible instead of silently passing."""
+        self.notes.append(msg)
+
     def merge(self, other: "Result") -> None:
         self.errors.extend(other.errors)
         self.warnings.extend(other.warnings)
+        self.notes.extend(other.notes)
 
 
 PLACEHOLDERS = ["TBD", "TODO", "UNKNOWN", "ASK LATER", "FILL IN", "FIXME"]
@@ -141,6 +155,71 @@ def check_yaml_validity(root: Path, res: Result) -> None:
         load_yaml(path, res)
 
 
+# Each of these artifacts has a JSON Schema in ci/schemas/. A file that parses as
+# YAML but has the wrong SHAPE (a list where a map is expected, a transition with
+# no target, an authority_map that mis-nests) currently slips through: the
+# downstream checks read an empty set and pass vacuously. Schema validation makes
+# that fail loudly instead. The same schema covers the real artifact and its
+# _TEMPLATE.yaml twin, since templates must stay structurally valid too.
+SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
+SCHEMA_BY_STEM = {
+    "INVARIANTS": "invariants.schema.json",
+    "DOMAIN_RULES": "domain_rules.schema.json",
+    "STATE_MACHINES": "state_machines.schema.json",
+    "EVENT_MODEL": "event_model.schema.json",
+}
+_SCHEMA_CACHE: dict[str, dict] = {}
+
+
+def _schema_stem_for(path: Path) -> str | None:
+    """Return the schema key for a file, matching both `INVARIANTS.yaml` and
+    `INVARIANTS_TEMPLATE.yaml`. None if the file is not a schema-governed artifact."""
+    name = path.name
+    for stem in SCHEMA_BY_STEM:
+        if name == f"{stem}.yaml" or name == f"{stem}_TEMPLATE.yaml":
+            return stem
+    return None
+
+
+def _load_schema(stem: str, res: Result) -> dict | None:
+    if stem in _SCHEMA_CACHE:
+        return _SCHEMA_CACHE[stem]
+    spath = SCHEMA_DIR / SCHEMA_BY_STEM[stem]
+    try:
+        schema = json.loads(spath.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        res.error(f"[SCHEMA] cannot load schema {spath.name}: {exc}")
+        return None
+    _SCHEMA_CACHE[stem] = schema
+    return schema
+
+
+def check_schema_conformance(root: Path, res: Result) -> None:
+    """Validate every schema-governed YAML artifact (in examples/, apps/, and
+    domain-templates/) against its JSON Schema. Reports the first structural error
+    per file with a JSON-pointer-ish location so the fix is obvious."""
+    for path in sorted(root.rglob("*.yaml")):
+        if ".git" in path.parts:
+            continue
+        stem = _schema_stem_for(path)
+        if stem is None:
+            continue
+        try:
+            blob = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (yaml.YAMLError, OSError, UnicodeDecodeError):
+            continue  # parse/read failures are already reported by check_yaml_validity
+        schema = _load_schema(stem, res)
+        if schema is None:
+            continue
+        validator = jsonschema.Draft202012Validator(schema)
+        errors = sorted(validator.iter_errors(blob), key=lambda e: list(e.absolute_path))
+        if errors:
+            exc = errors[0]
+            loc = "/".join(str(p) for p in exc.absolute_path) or "(root)"
+            rel = path.relative_to(root).as_posix()
+            res.error(f"[SCHEMA] {rel}: {exc.message} (at {loc})")
+
+
 def check_template_purity(root: Path, res: Result) -> None:
     # No _TEMPLATE files living inside examples/ or apps/.
     for parent in ("examples", "apps"):
@@ -171,7 +250,9 @@ def check_no_placeholders(packages: list[Path], res: Result) -> None:
                 continue
             for token in PLACEHOLDERS:
                 if re.search(rf"\b{re.escape(token)}\b", text):
-                    res.warn(f"[PLACEHOLDER] '{token}' in {path}")
+                    # checks.md #9: a package carrying unresolved domain logic
+                    # "may not proceed" -- this is a gate failure, not a nit.
+                    res.error(f"[PLACEHOLDER] '{token}' in {path}")
 
 
 # --------------------------------------------------------------------------- #
@@ -209,6 +290,11 @@ def check_invariant_consistency(pkg: Path, res: Result) -> None:
     rules_blob = load_yaml(dom / "DOMAIN_RULES.yaml", res)
     inv = normalize_invariants(inv_blob)
     rules = normalize_invariants(rules_blob)
+    # A constitution with no invariants is not a spec the gate can vouch for.
+    if not inv:
+        res.error(f"[INV-DRIFT] {pkg.name}: INVARIANTS.yaml declares no invariants")
+    if not rules:
+        res.error(f"[INV-DRIFT] {pkg.name}: DOMAIN_RULES.yaml declares no invariants")
     if not inv or not rules:
         return
 
@@ -273,18 +359,59 @@ def _defined_events(pkg: Path, res: Result) -> set[str]:
     return defined
 
 
+def _declared_triggers(pkg: Path, res: Result) -> set[str]:
+    """Triggers live in their OWN namespace, separate from events. A trigger is the
+    command/cause that drives a transition; it does not have to emit an event. They
+    are declared under `triggers:` in EVENT_MODEL.yaml (and optionally onboarding/
+    EVENTS.yaml), as either a map {name: {...}} or a list."""
+    declared: set[str] = set()
+
+    def absorb(blob) -> None:
+        trig = blob.get("triggers") if isinstance(blob, dict) else None
+        if isinstance(trig, dict):
+            declared.update(map(str, trig.keys()))
+        elif isinstance(trig, list):
+            for t in trig:
+                if isinstance(t, dict) and t.get("name"):
+                    declared.add(str(t["name"]))
+                elif isinstance(t, str):
+                    declared.add(t)
+
+    absorb(load_yaml(domain_dir(pkg) / "EVENT_MODEL.yaml", res))
+    onboarding_events = pkg / "onboarding" / "EVENTS.yaml"
+    if onboarding_events.exists():
+        absorb(load_yaml(onboarding_events, res))
+    return declared
+
+
 def check_event_consistency(pkg: Path, res: Result) -> None:
+    """Triggers and events are SEPARATE namespaces (the constitution's trigger/event
+    separation). A transition's `event:` is the trigger that fires it; its `emits:`
+    is the event it produces -- which may legitimately be null. So:
+      * every `emits:` value must be a defined event  (events: in EVENT_MODEL.yaml)
+      * every transition `event:` must be a declared trigger  (triggers: there)
+    A trigger that emits null is valid and must never warn; a trigger is NOT
+    required to have a matching events: entry."""
     sm = load_yaml(domain_dir(pkg) / "STATE_MACHINES.yaml", res)
     defined = _defined_events(pkg, res)
+    declared = _declared_triggers(pkg, res)
+    emitted = _emitted_events_from_state_machines(sm)       # already excludes null
+    triggers = _trigger_events_from_state_machines(sm)
+
+    # An empty event model / triggerless state machine is not a passing spec.
     if not defined:
-        res.warn(f"[EVENTS] {pkg.name}: no events defined in EVENT_MODEL.yaml")
-        return
-    # Hard rule: anything actually emitted must be defined.
-    for ev in sorted(_emitted_events_from_state_machines(sm) - defined):
-        res.error(f"[EVENTS] {pkg.name}: emitted event '{ev}' is not defined in the event model")
-    # Soft rule: transition triggers that aren't modeled yet (the example admits this).
-    for ev in sorted(_trigger_events_from_state_machines(sm) - defined):
-        res.warn(f"[EVENTS] {pkg.name}: transition trigger '{ev}' has no event-model entry yet")
+        res.error(f"[EVENTS] {pkg.name}: no events defined in EVENT_MODEL.yaml")
+    if not triggers:
+        res.error(f"[EVENTS] {pkg.name}: no transition triggers declared in STATE_MACHINES.yaml")
+
+    # Hard rule: every emitted event must be defined in the event model.
+    for ev in sorted(emitted - defined):
+        res.error(f"[EVENTS] {pkg.name}: emitted event '{ev}' is not defined in EVENT_MODEL.yaml events:")
+
+    # Hard rule: every transition trigger must be declared in the trigger namespace.
+    # (This is the "undeclared trigger" gate -- emitting null does not exempt it.)
+    for ev in sorted(triggers - declared):
+        res.error(f"[EVENTS] {pkg.name}: transition trigger '{ev}' is not declared in EVENT_MODEL.yaml triggers:")
 
 
 def _authority_permissions(rules_blob) -> set[str]:
@@ -298,19 +425,184 @@ def _authority_permissions(rules_blob) -> set[str]:
     return perms
 
 
+def _rbac_path(pkg: Path) -> Path:
+    """App instances keep RBAC under onboarding/; flat worked examples keep it
+    beside the domain artifacts (they have no onboarding/ dir). The old code only
+    ever looked under onboarding/, so a flat example's RBAC was never found and
+    its authority_map went perpetually unverified."""
+    if is_app_instance(pkg):
+        return pkg / "onboarding" / "RBAC.yaml"
+    return domain_dir(pkg) / "RBAC.yaml"
+
+
+def _authority_tiers(rules_blob) -> dict[str, str]:
+    """permission -> min_tier as declared in authority_map (when present)."""
+    tiers: dict[str, str] = {}
+    amap = rules_blob.get("authority_map") if isinstance(rules_blob, dict) else None
+    if isinstance(amap, dict):
+        for key, body in amap.items():
+            if isinstance(body, dict) and body.get("min_tier") is not None:
+                perm = str(body.get("permission", key))
+                tiers[perm] = str(body["min_tier"]).strip()
+    return tiers
+
+
+def _rbac_tiers(rbac) -> dict[str, str]:
+    """permission -> declared tier in RBAC.yaml (min_tier, or tier as a fallback)."""
+    tiers: dict[str, str] = {}
+    perms = rbac.get("permissions") if isinstance(rbac, dict) else None
+    if isinstance(perms, dict):
+        for perm, body in perms.items():
+            if isinstance(body, dict):
+                t = body.get("min_tier", body.get("tier"))
+                if t is not None:
+                    tiers[str(perm)] = str(t).strip()
+    return tiers
+
+
+def _domain_vocabulary(pkg: Path, res: Result) -> set[str]:
+    """Tokens that belong exclusively to the domain: entity names, invariant ids,
+    and state-machine state names. Derived from DOMAIN_MODEL.md, INVARIANTS.yaml,
+    and STATE_MACHINES.yaml so nothing is hardcoded -- onboarding referencing any
+    of these would be a domain dependency (constitution principle #5)."""
+    dom = domain_dir(pkg)
+    vocab: set[str] = set(_modeled_entities(dom).keys())
+    vocab |= set(normalize_invariants(load_yaml(dom / "INVARIANTS.yaml", res)).keys())
+    sm = load_yaml(dom / "STATE_MACHINES.yaml", res)
+    if isinstance(sm, dict):
+        for ent in (sm.get("entities") or {}).values():
+            if isinstance(ent, dict):
+                for st in ent.get("states") or []:
+                    vocab.add(str(st))
+    vocab.discard("")
+    return vocab
+
+
+def _iter_yaml_strings(obj):
+    """Yield every mapping key and scalar string in a parsed YAML structure.
+    Working from the parsed tree (not raw text) means comments -- which may
+    legitimately mention the domain in prose -- are not flagged; only actual data
+    references are."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(k, str):
+                yield k
+            yield from _iter_yaml_strings(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from _iter_yaml_strings(item)
+    elif isinstance(obj, str):
+        yield obj
+
+
+def _declared_event_trigger_names(blob) -> set[str]:
+    """The key names declared under an onboarding EVENTS.yaml's own `events:` and
+    `triggers:` maps. Onboarding owns its event/trigger vocabulary, and event names
+    (e.g. exception_resolved, period_closed) legitimately collide with
+    state-machine state names -- so these names are exempt from the domain-token
+    match in that file. Only the declaration KEYS are exempt; their values are
+    still scanned, so a domain entity smuggled into a payload is still caught."""
+    names: set[str] = set()
+    if not isinstance(blob, dict):
+        return names
+    for section in ("events", "triggers"):
+        sec = blob.get(section)
+        if isinstance(sec, dict):
+            names |= set(map(str, sec.keys()))
+        elif isinstance(sec, list):
+            for item in sec:
+                if isinstance(item, dict) and item.get("name"):
+                    names.add(str(item["name"]))
+                elif isinstance(item, str):
+                    names.add(item)
+    return names
+
+
+def _check_seam_direction(pkg: Path, res: Result) -> None:
+    """Constitution principle #5: the domain may read onboarding context, but
+    onboarding must never depend on the domain. Flag any onboarding/*.yaml whose
+    data references a domain entity, invariant id, or state name.
+
+    DATA_GOVERNANCE.yaml is exempt as a whole. It is the seam's data-policy
+    mapping ONTO domain data: the governance check (check_data_governance) requires
+    it to key every entry by the governed `Entity.attribute` / `Entity` and to
+    justify each in prose that necessarily names the domain. Naming the data it
+    governs is its purpose, not a runtime dependency of onboarding logic on the
+    domain -- so its references are not a direction violation. (This is why a flat
+    worked example, whose governance file sits beside the domain rather than under
+    onboarding/, never tripped this: the conflict only exists for a real app
+    instance, where the seam owns governance.)"""
+    onboarding = pkg / "onboarding"
+    if not onboarding.is_dir():
+        return
+    vocab = _domain_vocabulary(pkg, res)
+    if not vocab:
+        return
+    for path in sorted(onboarding.glob("*.yaml")):
+        if path.name == "DATA_GOVERNANCE.yaml":
+            continue
+        blob = load_yaml(path, res)
+        # onboarding/EVENTS.yaml declares its own events/triggers; their names may
+        # legitimately collide with domain state names. Drop just those declared
+        # names from this file's vocabulary -- values are still fully scanned.
+        file_vocab = vocab
+        if path.name == "EVENTS.yaml":
+            file_vocab = vocab - _declared_event_trigger_names(blob)
+        if not file_vocab:
+            continue
+        patterns = {term: re.compile(rf"\b{re.escape(term)}\b") for term in file_vocab}
+        hits = {term for s in _iter_yaml_strings(blob)
+                for term, pat in patterns.items() if pat.search(s)}
+        for term in sorted(hits):
+            res.error(f"[SEAM] {pkg.name}: onboarding/{path.name} references domain "
+                      f"token '{term}' -- onboarding must not depend on the domain (principle #5)")
+
+
 def check_seam_consistency(pkg: Path, res: Result) -> None:
     rules_blob = load_yaml(domain_dir(pkg) / "DOMAIN_RULES.yaml", res)
     perms = _authority_permissions(rules_blob)
-    rbac_path = pkg / "onboarding" / "RBAC.yaml"
+
+    # Rule 2 (direction): independent of RBAC, so always check it.
+    _check_seam_direction(pkg, res)
+
+    rbac_path = _rbac_path(pkg)
     if not rbac_path.exists():
         if perms:
             res.warn(f"[SEAM] {pkg.name}: authority_map defines {len(perms)} permission(s) "
-                     f"but no onboarding/RBAC.yaml is present to verify them against")
+                     f"but no {rbac_path.name} is present to verify them against")
         return
     rbac = load_yaml(rbac_path, res)
     declared = set((rbac or {}).get("permissions", {}).keys()) if isinstance(rbac, dict) else set()
     for p in sorted(perms - set(map(str, declared))):
         res.error(f"[SEAM] {pkg.name}: authority_map permission '{p}' is not declared in RBAC.yaml")
+
+    # Rule 1 (tier alignment): where both files give a tier for the same
+    # permission, they must agree -- otherwise the gate enforces a tier the domain
+    # never intended.
+    a_tiers = _authority_tiers(rules_blob)
+    r_tiers = _rbac_tiers(rbac)
+    for perm in sorted(set(a_tiers) & set(r_tiers)):
+        if a_tiers[perm] != r_tiers[perm]:
+            res.error(f"[SEAM] {pkg.name}: tier mismatch for permission '{perm}' "
+                      f"(authority_map min_tier={a_tiers[perm]} vs RBAC.yaml min_tier={r_tiers[perm]})")
+
+
+_FENCE_RE = re.compile(r"```[^\n]*\n(.*?)\n```", re.DOTALL)
+
+
+def _parse_observability_block(text: str) -> dict[str, dict]:
+    """OBSERVABILITY.md must carry a fenced code block whose YAML has a top-level
+    `observability:` map of invariant_id -> {metric, alert, threshold}. Substring
+    matching can't tell 'INV-3 is alerted' from 'INV-3 is NOT observable'; a parsed
+    structure can. Returns the map, or {} if no such block exists."""
+    for body in _FENCE_RE.findall(text):
+        try:
+            blob = yaml.safe_load(body)
+        except yaml.YAMLError:
+            continue
+        if isinstance(blob, dict) and isinstance(blob.get("observability"), dict):
+            return {str(k): v for k, v in blob["observability"].items()}
+    return {}
 
 
 def check_invariant_observability(pkg: Path, res: Result) -> None:
@@ -320,30 +612,267 @@ def check_invariant_observability(pkg: Path, res: Result) -> None:
     if not obs_path.exists():
         res.error(f"[OBSERVE] {pkg.name}: OBSERVABILITY.md missing")
         return
-    obs_text = obs_path.read_text(encoding="utf-8")
+    obs_map = _parse_observability_block(obs_path.read_text(encoding="utf-8"))
+    if not obs_map:
+        res.error(f"[OBSERVE] {pkg.name}: OBSERVABILITY.md has no machine-readable "
+                  f"`observability:` block (fenced YAML mapping invariant_id -> "
+                  f"{{metric, alert, threshold}})")
+        return
+
     for inv_id, body in inv.items():
-        metric = str(body.get("observable_as", "")).strip()
-        seen = (inv_id in obs_text) or (metric and metric in obs_text)
-        if not seen:
-            res.error(f"[OBSERVE] {pkg.name}: {inv_id} has no metric/entry in OBSERVABILITY.md")
+        entry = obs_map.get(inv_id)
+        if not isinstance(entry, dict):
+            res.error(f"[OBSERVE] {pkg.name}: {inv_id} has no entry in the "
+                      f"OBSERVABILITY.md observability: block")
             continue
-        if str(body.get("severity", "")).lower() == "critical":
-            # Critical invariants must have alerting somewhere near their mention.
-            if "critical" not in obs_text.lower():
-                res.warn(f"[OBSERVE] {pkg.name}: {inv_id} is critical but no 'Critical' alert found")
+        # A malformed entry defeats the purpose of a parsed block.
+        bad = []
+        if not str(entry.get("metric", "")).strip():
+            bad.append("metric")
+        if not str(entry.get("threshold", "")).strip():
+            bad.append("threshold")
+        if not isinstance(entry.get("alert"), bool):
+            bad.append("alert(must be true/false)")
+        if bad:
+            res.error(f"[OBSERVE] {pkg.name}: {inv_id} observability entry is "
+                      f"missing/invalid: {', '.join(bad)}")
+            continue
+        # Critical invariants must actually alert -- not merely be mentioned.
+        if str(body.get("severity", "")).lower() == "critical" and entry["alert"] is not True:
+            res.error(f"[OBSERVE] {pkg.name}: {inv_id} is severity:critical but its "
+                      f"observability entry has alert: {entry['alert']} (must be true)")
+
+
+# A field/entity is "governed" when the package declares it carries data in one of
+# these classes. Tenancy is the org_id-bearing case; the rest are PII-shaped.
+GOVERNED_CLASSES = ("personal", "sensitive", "regulated", "tenant")
+# Minimum a governance entry must answer for a declared-sensitive field.
+REQUIRED_GOV_KEYS = ("classification", "purpose", "retention")
+
+
+def _governance_path(pkg: Path) -> Path:
+    """App instances keep governance under onboarding/ (the seam owns data policy);
+    flat worked examples keep it beside the domain artifacts."""
+    if is_app_instance(pkg):
+        return pkg / "onboarding" / "DATA_GOVERNANCE.yaml"
+    return domain_dir(pkg) / "DATA_GOVERNANCE.yaml"
+
+
+def _data_field_declarations(pkg: Path, res: Result) -> tuple[list[dict], list[str]]:
+    """Read the optional `data_fields:` block from DOMAIN_RULES.yaml.
+
+    Convention (see ci/constitution-checks.md #7):
+        data_fields:
+          sensitive_fields:
+            - field: Entity.attribute
+              classification: personal | sensitive | regulated
+          tenant_scoped_entities:
+            - Entity            # an entity that carries org_id
+
+    Returns (sensitive_fields, tenant_scoped_entities)."""
+    rules = load_yaml(domain_dir(pkg) / "DOMAIN_RULES.yaml", res)
+    decl = rules.get("data_fields") if isinstance(rules, dict) else None
+    sensitive: list[dict] = []
+    tenant: list[str] = []
+    if isinstance(decl, dict):
+        for item in decl.get("sensitive_fields") or []:
+            if isinstance(item, dict) and item.get("field"):
+                sensitive.append(item)
+        for ent in decl.get("tenant_scoped_entities") or []:
+            tenant.append(str(ent))
+    return sensitive, tenant
+
+
+def _modeled_entities(dom: Path) -> dict[str, bool | None]:
+    """Parse DOMAIN_MODEL.md's Entities section for the entity universe.
+
+    Every `### <Name>` heading under the `## ... Entities` heading is a modeled
+    entity. Its `Tenancy:` tag (when present) is captured as True (yes) / False
+    (no) / None (unstated). The header name is normalized: '### Adjustment
+    (journal entry)' -> 'Adjustment'. This is the SOURCE OF TRUTH for which
+    entities exist; a hand-authored list is only ever cross-checked against it."""
+    path = dom / "DOMAIN_MODEL.md"
+    out: dict[str, bool | None] = {}
+    if not path.exists():
+        return out
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return out
+
+    in_entities = False
+    current: str | None = None
+    buf: list[str] = []
+
+    def flush() -> None:
+        nonlocal current, buf
+        if current is not None:
+            block = "\n".join(buf)
+            m = re.search(r"Tenancy.*?\b(yes|no)\b", block, re.IGNORECASE | re.DOTALL)
+            out[current] = (m.group(1).lower() == "yes") if m else None
+        current, buf = None, []
+
+    for line in text.splitlines():
+        if re.match(r"##\s+", line):                 # a `## ` section heading
+            flush()
+            in_entities = "entit" in line.lower()
+            continue
+        h3 = re.match(r"###\s+(.*)", line)
+        if h3:
+            flush()
+            if in_entities:
+                name = re.sub(r"[`*]", "", h3.group(1).split("(")[0]).strip()
+                current = name or None
+            continue
+        if current is not None:
+            buf.append(line)
+    flush()
+    return out
+
+
+def _tenancy_is_universal(pkg: Path, res: Result) -> bool:
+    """True when any invariant has scope `all` (e.g. INV-8: 'every entity carries
+    org_id'). In that case every modeled entity is tenant-scoped, regardless of
+    its own Tenancy tag."""
+    dom = domain_dir(pkg)
+    for fname in ("INVARIANTS.yaml", "DOMAIN_RULES.yaml"):
+        for body in normalize_invariants(load_yaml(dom / fname, res)).values():
+            if str(body.get("scope", "")).strip().lower() == "all":
+                return True
+    return False
 
 
 def check_data_governance(pkg: Path, res: Result) -> None:
-    """Only meaningful for full app instances; the worked example has no onboarding."""
-    if not is_app_instance(pkg):
+    """Coverage, not mere presence. Every field the package declares as
+    personal/sensitive/regulated must carry a complete DATA_GOVERNANCE.yaml entry
+    (classification + purpose + retention), and every org_id-bearing entity must
+    carry a tenancy governance note. A governance file that merely exists proves
+    nothing about whether the protected data is actually accounted for.
+
+    The tenant-entity universe is DERIVED from DOMAIN_MODEL.md (plus INV-8-style
+    scope:all), not trusted from the hand-authored data_fields list -- that list
+    is folded in as an additional check target so it can't go stale silently."""
+    sensitive, tenant_hand = _data_field_declarations(pkg, res)
+
+    # Derive the set of entities that require a tenancy note.
+    modeled = _modeled_entities(domain_dir(pkg))
+    universal = _tenancy_is_universal(pkg, res)
+    tenant_required: set[str] = set(tenant_hand)
+    for name, tenancy in modeled.items():
+        if universal or tenancy is True:
+            tenant_required.add(name)
+
+    # Nothing protected -> nothing to cross-check. App instances handling real
+    # users almost always have protected data, so flag the silence there.
+    if not sensitive and not tenant_required:
+        if is_app_instance(pkg):
+            res.warn(f"[GOVERN] {pkg.name}: no sensitive fields or tenant-scoped entities "
+                     f"found -- confirm the app truly handles no personal/tenant data")
         return
-    gov_path = pkg / "onboarding" / "DATA_GOVERNANCE.yaml"
+
+    gov_path = _governance_path(pkg)
     if not gov_path.exists():
-        res.error(f"[GOVERN] {pkg.name}: onboarding/DATA_GOVERNANCE.yaml missing")
+        res.error(f"[GOVERN] {pkg.name}: package has governed data "
+                  f"({len(sensitive)} sensitive field(s), {len(tenant_required)} tenant-scoped "
+                  f"entity(ies)) but {gov_path.name} is missing")
         return
+
     gov = load_yaml(gov_path, res)
-    if not (isinstance(gov, dict) and gov.get("fields")):
-        res.warn(f"[GOVERN] {pkg.name}: DATA_GOVERNANCE.yaml has no field entries")
+    fields = gov.get("fields") if isinstance(gov, dict) else None
+    entities = gov.get("entities") if isinstance(gov, dict) else None
+    fields = fields if isinstance(fields, dict) else {}
+    entities = entities if isinstance(entities, dict) else {}
+
+    # (a) Every declared-sensitive field needs a complete governance entry.
+    for item in sensitive:
+        name = str(item["field"])
+        entry = fields.get(name)
+        if not isinstance(entry, dict):
+            cls = item.get("classification", "sensitive")
+            res.error(f"[GOVERN] {pkg.name}: field '{name}' is declared {cls} "
+                      f"but has no entry in {gov_path.name}")
+            continue
+        missing = [k for k in REQUIRED_GOV_KEYS if not str(entry.get(k, "")).strip()]
+        if missing:
+            res.error(f"[GOVERN] {pkg.name}: governance entry for '{name}' is "
+                      f"missing {', '.join(missing)}")
+
+    # (b) Every tenant-scoped (org_id-bearing) entity needs a governance note.
+    #     tenant_required is derived from DOMAIN_MODEL.md, so a new entity added
+    #     there is caught even if nobody updated data_fields.tenant_scoped_entities.
+    for ent in sorted(tenant_required):
+        note = entities.get(ent)
+        has_note = isinstance(note, dict) and bool(str(note.get("note", "")).strip())
+        # An explicit per-field org_id entry counts as covering tenancy too.
+        has_field = isinstance(fields.get(f"{ent}.org_id"), dict)
+        if not has_note and not has_field:
+            res.error(f"[GOVERN] {pkg.name}: tenant-scoped entity '{ent}' (org_id) "
+                      f"has no governance note in {gov_path.name}")
+
+
+# Generated application code lives here, one tree per app instance.
+CODE_DIR = "src"
+# Files worth scanning for hardcoded policy literals.
+CODE_SUFFIXES = {
+    ".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".java", ".kt", ".rb",
+    ".rs", ".cs", ".php", ".scala", ".swift", ".sql",
+}
+
+
+def _policy_literals(rules_blob) -> dict[str, str]:
+    """Flatten the `policies:` block into {policy_name: literal} for the values
+    that make sense to catch hardcoded in source.
+
+    Only numeric thresholds/limits are scanned, and only those with |value| >= 10:
+    a bare 0/1/3 (e.g. amount_tolerance_minor: 0, date_window_days: 3) appears in
+    real code constantly and would make the check cry wolf. Strings like
+    default_currency: USD are skipped for the same reason. The distinctive
+    thresholds -- materiality_minor, auto_post_limit_minor, etc. -- are the ones a
+    leak would actually hardcode, and they are caught."""
+    out: dict[str, str] = {}
+    pol = rules_blob.get("policies") if isinstance(rules_blob, dict) else None
+    if not isinstance(pol, dict):
+        return out
+    for name, val in pol.items():
+        if isinstance(val, bool):
+            continue
+        if isinstance(val, int) or isinstance(val, float):
+            if abs(val) >= 10:
+                out[str(name)] = repr(val) if isinstance(val, float) else str(val)
+    return out
+
+
+def check_policy_externalization(pkg: Path, res: Result) -> None:
+    """Check #8: thresholds, limits, and tiers must live in YAML config, never be
+    hardcoded in generated code. This can only run against generated code, which
+    lives in apps/<app>/src. Until that tree exists the check is DORMANT -- it
+    emits an informational note so its silence never reads as a pass."""
+    if not is_app_instance(pkg):
+        return  # flat worked examples ship no generated code
+    code_dir = pkg / CODE_DIR
+    if not code_dir.is_dir():
+        res.note(f"[POLICY] {pkg.name}: check inactive -- no {CODE_DIR}/ code "
+                 f"directory yet (runs once code is generated)")
+        return
+
+    literals = _policy_literals(load_yaml(domain_dir(pkg) / "DOMAIN_RULES.yaml", res))
+    if not literals:
+        return
+    patterns = {name: (value, re.compile(rf"(?<![\w.]){re.escape(value)}(?![\w.])"))
+                for name, value in literals.items()}
+    for path in sorted(code_dir.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in CODE_SUFFIXES:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        rel = path.relative_to(pkg).as_posix()
+        for name, (value, pat) in patterns.items():
+            if pat.search(text):
+                res.error(f"[POLICY] {pkg.name}: policy '{name}' (={value}) is hardcoded "
+                          f"in {rel}; externalize it to DOMAIN_RULES.yaml policies "
+                          f"and read it from config")
 
 
 # --------------------------------------------------------------------------- #
@@ -355,6 +884,7 @@ def run(root: Path, only_package: str | None) -> Result:
 
     # Repo-wide gates
     check_yaml_validity(root, res)
+    check_schema_conformance(root, res)
     check_template_purity(root, res)
 
     packages = discover_packages(root)
@@ -375,6 +905,7 @@ def run(root: Path, only_package: str | None) -> Result:
         check_seam_consistency(pkg, res)
         check_invariant_observability(pkg, res)
         check_data_governance(pkg, res)
+        check_policy_externalization(pkg, res)
 
     return res, packages
 
@@ -394,6 +925,11 @@ def main() -> int:
     print(f"  root: {root}")
     print(f"  packages checked: {', '.join(p.name for p in packages) or '(none)'}")
     print("=" * 64)
+
+    if res.notes:
+        print(f"\nNOTES ({len(res.notes)}):")
+        for n in res.notes:
+            print(f"  - {n}")
 
     if res.warnings:
         print(f"\nWARNINGS ({len(res.warnings)}):")

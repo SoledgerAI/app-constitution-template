@@ -9,6 +9,7 @@ trusted to obey into a build that actually fails when the package is wrong.
 | Check | What it catches | Severity |
 |---|---|---|
 | YAML validity | A `.yaml` file that won't parse | error |
+| Schema conformance | A schema-governed artifact (`INVARIANTS`/`DOMAIN_RULES`/`STATE_MACHINES`/`EVENT_MODEL`) that parses but has the wrong **shape** — e.g. `invariants` as a list where a map is required, a transition with no `to`, a mis-nested `authority_map` that would otherwise yield an empty set and pass vacuously | error |
 | Template purity | A `_TEMPLATE` file or a `copy`/`(1)` duplicate living in `examples/` or `apps/` | error |
 | Package completeness | A real app missing a required domain/onboarding artifact | error |
 | **Invariant consistency** | `INVARIANTS.yaml` and `DOMAIN_RULES.yaml` disagreeing on any invariant's `on_violation`, `enforced_at`, or `scope` | error |
@@ -26,11 +27,15 @@ Errors close the gate (exit code 1). Warnings don't, unless you pass `--strict`.
 Locally, from the repo root:
 
 ```bash
-pip install pyyaml
+pip install pyyaml jsonschema
 python3 ci/constitution_validate.py                 # check everything
 python3 ci/constitution_validate.py --package reconciliation-ledger
 python3 ci/constitution_validate.py --strict        # warnings fail too
+python3 tests/run_validator_tests.py                # prove the gate still CATCHES every failure mode
 ```
+
+The JSON Schemas the gate validates against live in `ci/schemas/`. Each governs
+both the real artifact (`INVARIANTS.yaml`) and its `_TEMPLATE.yaml` twin.
 
 Automatically: the workflow in `.github/workflows/constitution.yml` runs this on
 every push and pull request to `main`. A failing run shows a red X on the commit

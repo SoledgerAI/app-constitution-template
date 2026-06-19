@@ -1,0 +1,69 @@
+# DOMAIN_RULES.yaml — access-grants (app instance: onboarding-demo)
+# enforced_at, scope, and on_violation mirror INVARIANTS.yaml, which is the single
+# registry of invariant truth. If they diverge, the constitution gate
+# (ci/constitution_validate.py) fails the build. Edit INVARIANTS.yaml first, then
+# mirror the change here.
+version: 1
+
+invariants:
+  - id: INV-1
+    statement: "A pending AccessRequest transitions to exactly one of approved or denied, and never changes again."
+    scope: AccessRequest
+    enforced_at: request_decision
+    on_violation: reject
+    test: "request.state in [approved, denied] AND no transition out of a decided state"
+
+  - id: INV-2
+    statement: "A Grant's expires_at is strictly after granted_at and no more than max_grant_ttl_hours later."
+    scope: Grant
+    enforced_at: grant_create
+    on_violation: reject
+    test: "granted_at < expires_at <= granted_at + policies.max_grant_ttl_hours"
+
+  - id: INV-3
+    statement: "Every entity carries org_id; no cross-org reference exists."
+    scope: all
+    enforced_at: repository
+    on_violation: halt
+    test: "every query is org-scoped; no FK crosses org_id"
+
+policies:
+  max_grant_ttl_hours: 72              # a grant may live at most 72 hours before expiry
+  grant_sweep_interval_seconds: 300    # background sweep that expires due grants
+  default_role: viewer                 # role a brand-new member starts with (string, not scanned)
+
+authority_map:
+  access.request:
+    permission: access.request
+    min_tier: 1
+    requires_approval: n
+    notes: Submit a request to use a protected resource.
+  access.approve:
+    permission: access.approve
+    min_tier: 3
+    requires_approval: n
+    notes: Approve or deny a pending request.
+  access.revoke:
+    permission: access.revoke
+    min_tier: 3
+    requires_approval: y
+    notes: Revoke a live grant before its expiry; fully audited.
+
+derived:
+  grant_lifetime_seconds: "expires_at - granted_at"
+  request_is_decided: "state in [approved, denied]"
+
+# Data governance declaration. Anything listed here is protected data and MUST
+# carry a matching entry in onboarding/DATA_GOVERNANCE.yaml — the constitution gate
+# fails the build otherwise. Declare once here; govern once there.
+data_fields:
+  sensitive_fields:
+    - field: AccessRequest.requested_by
+      classification: personal      # user identifier of the requester
+    - field: Grant.approved_by
+      classification: personal      # user identifier of the approver
+  # Entities that carry org_id (INV-3 scope:all makes every entity tenant-scoped).
+  # Listed here as an additional check target; the source of truth is DOMAIN_MODEL.md.
+  tenant_scoped_entities:
+    - AccessRequest
+    - Grant

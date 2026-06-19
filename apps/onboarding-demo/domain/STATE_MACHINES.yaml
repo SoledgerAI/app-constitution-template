@@ -1,0 +1,33 @@
+# STATE_MACHINES.yaml — access-grants (app instance: onboarding-demo)
+# A transition's `event:` is the TRIGGER that fires it (declared under triggers: in
+# EVENT_MODEL.yaml); its `emits:` is the EVENT it publishes (defined under events:
+# there), and null is valid. The constitution gate enforces both namespaces.
+version: 1
+
+entities:
+
+  access_request:
+    description: A member's pending ask to use a protected resource.
+    states: [submitted, approved, denied]
+    initial: submitted
+    terminal: [approved, denied]
+    transitions:
+      - { from: submitted, to: approved, event: request_approved, guard: "actor holds access.approve at Tier 3", effect: "record decision; mint Grant", emits: access_granted, authority: access.approve }
+      - { from: submitted, to: denied,   event: request_denied,   guard: "actor holds access.approve at Tier 3", effect: "record decision and reason", emits: access_denied, authority: access.approve }
+    forbidden_transitions:
+      - { from: approved, to: denied, reason: "The decision is terminal (INV-1); a decided request never changes." }
+      - { from: denied, to: approved, reason: "The decision is terminal (INV-1); raise a new request instead." }
+    idempotent_events: [request_approved, request_denied]
+
+  grant:
+    description: A time-boxed authorization minted from an approved request.
+    states: [active, expired, revoked]
+    initial: active
+    terminal: [expired, revoked]
+    transitions:
+      - { from: active, to: expired, event: grant_expired,  guard: "now >= expires_at", effect: "deactivate grant", emits: access_expired, authority: none }
+      - { from: active, to: revoked, event: access_revoked, guard: "actor holds access.revoke at Tier 3", effect: "deactivate grant; record revoker", emits: access_revoked, authority: access.revoke }
+    forbidden_transitions:
+      - { from: expired, to: active, reason: "A grant's lifetime is fixed at mint (INV-2); mint a fresh grant instead." }
+      - { from: revoked, to: active, reason: "Revocation is terminal; mint a fresh grant instead." }
+    idempotent_events: [grant_expired]
