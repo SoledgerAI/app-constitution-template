@@ -77,22 +77,67 @@ Only after Layer 2 is complete and checks pass may code generation begin.
 
 ---
 
+# Required Reading Order
+
+Before generating or modifying implementation code, read the shared inputs in
+this order:
+
+```txt
+REPO_MAP.md
+APP_BUILD_PROCESS.md
+constitution/CONSTITUTION.md
+constitution/onboarding/ONBOARDING_ARCHITECTURE.md
+constitution/onboarding/IMPLEMENTATION_SPEC.md
+constitution/onboarding/SEAM_CONTRACT.md
+constitution/onboarding/TEST_PLAN.md
+ci/constitution-checks.md
+agent/BUILD_HANDOFF.md        # this file — the operating rules
+```
+
+Then read the complete app-specific package:
+
+```txt
+apps/<app>/onboarding/        # RISK_POLICIES, RBAC, DATA_GOVERNANCE, EVENTS
+apps/<app>/domain/            # DOMAIN_MODEL, INVARIANTS, DOMAIN_RULES, STATE_MACHINES, EVENT_MODEL, OBSERVABILITY
+apps/<app>/TEST_PLAN.md
+apps/<app>/IMPLEMENTATION_PLAN.md
+```
+
+---
+
 # Required Build Sequence (do not skip or reorder)
 
-1. Define the app (purpose, domain boundary, which regulated overlays apply)
-2. Clone onboarding policy templates → `apps/<app>/onboarding/` and tune them
-3. Complete the domain model
-4. Define invariants
-5. Define domain rules (including the `authority_map` seam binding)
-6. Define state machines
-7. Define event model
-8. Define observability (one metric per invariant)
-9. Define the test plan
-10. Generate the implementation plan
-11. Generate code
-12. Run tests
-13. Review
-14. Deploy
+The canonical, fourteen-step build sequence lives in
+[`APP_BUILD_PROCESS.md`](../APP_BUILD_PROCESS.md) — *Define the app* (step 1),
+*Clone onboarding policy templates* (step 2), through *Deploy* (step 14). Follow
+it exactly; do not restate or reorder it here.
+
+---
+
+# Required Implementation Sequence (when implementation is allowed)
+
+Only after the app package is complete and validation passes, proceed in this
+order:
+
+```txt
+1. Validate app package completeness.
+2. Validate YAML parsing.
+3. Validate template/example/instance purity.
+4. Validate seam consistency.
+5. Validate event consistency.
+6. Validate invariant observability.
+7. Summarize the domain, invariants and enforcement points, state machines and
+   forbidden transitions, the event model, and observability requirements.
+8. Review or produce IMPLEMENTATION_PLAN.md.
+9. Generate database schema.
+10. Generate domain services.
+11. Generate API contracts.
+12. Generate tests.
+13. Generate UI only after API/domain contracts exist.
+14. Run tests.
+15. Report results, gaps, failures, and unresolved assumptions.
+16. Prepare deployment notes.
+```
 
 ---
 
@@ -107,10 +152,13 @@ Stop immediately and ask if any are true:
 5. An event is referenced but not defined in `EVENTS.yaml` or `EVENT_MODEL.yaml`.
 6. A lifecycle transition is unclear.
 7. A state machine conflicts with a domain rule or an invariant.
-8. A test expectation cannot be derived from the constitution or the app package.
-9. The seam binding (`authority_map`) references a permission not present in `RBAC.yaml`.
-10. The user asks to begin coding before the package is complete.
-11. A required artifact is missing.
+8. An invariant is not observable.
+9. A test expectation cannot be derived from the constitution or the app package.
+10. The seam binding (`authority_map`) references a permission not present in `RBAC.yaml`.
+11. A policy value appears hardcoded that belongs in YAML.
+12. A tenant-scoped query lacks `org_id`.
+13. A required artifact is missing.
+14. The user asks to begin coding before the package is complete.
 
 Do not guess.
 
@@ -151,13 +199,38 @@ When working in this repo the agent acts as principal software architect, staff
 engineer, security architect, product architect, QA lead, and systems designer —
 **responsible for preserving system integrity**, not merely generating code.
 
+The agent must:
+
+1. Preserve the constitution; keep templates, examples, and app instances separate.
+2. Treat invariants as non-negotiable truth and policies as runtime YAML configuration.
+3. Produce the implementation plan before code; generate code from that plan and
+   tests from the domain package — never from assumptions.
+4. Preserve tenant isolation, auditability, idempotency, audit trails, event
+   emissions, RBAC and risk-policy checks, data-governance requirements, and the
+   one-way onboarding↔domain seam.
+5. Reject hardcoded thresholds, tiers, roles, risk settings, or event names that
+   belong in YAML.
+6. Ensure every critical invariant is observable.
+7. Report unresolved business logic instead of filling it in.
+
+## Refactoring rule
+
+The agent may refactor generated code only when the refactor preserves domain
+behavior, invariants, state transitions, event emissions, RBAC checks,
+risk-policy checks, data-governance requirements, audit trails, tenant isolation,
+and test expectations. A refactor that changes behavior requires a domain-artifact
+update first.
+
 ---
 
 # Implementation Readiness Checklist
 
 ```txt
 [ ] App purpose is clear
+[ ] All required app package files exist
+[ ] All YAML files parse
 [ ] Onboarding policy instances cloned and tuned (risk, rbac, governance, events)
+[ ] Templates, examples, and app instances are not mixed
 [ ] Domain model is complete
 [ ] Invariants are defined, severity-ranked, each enforced AND observable
 [ ] Domain rules are defined (including authority_map seam binding)
@@ -165,9 +238,12 @@ engineer, security architect, product architect, QA lead, and systems designer �
 [ ] Event model is defined; every emitted event exists
 [ ] Observability defined: one metric per invariant
 [ ] Seam consistency: every authority_map permission exists in RBAC.yaml
-[ ] Test expectations are defined and derivable
+[ ] Every tenant-scoped entity includes org_id
+[ ] Every PII/sensitive/regulated field has a data governance entry
+[ ] Test expectations are defined and derivable (TEST_PLAN.md)
+[ ] IMPLEMENTATION_PLAN.md is complete and aligned
 [ ] Regulated overlays (HIPAA/CIP/COPPA) flagged and pending signoff if applicable
-[ ] No unresolved business logic remains
+[ ] No unresolved placeholders or business logic remain
 ```
 
 If any item is unchecked, do not generate code.
